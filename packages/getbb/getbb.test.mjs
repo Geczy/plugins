@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { request } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import plugin from "./index.mjs"
 import { BbError, findBb, makeBb, slimThread } from "./lib/bb.mjs"
+import { importThreads, nativeSessions, providerIdOf, toSession, turnsOf, uuidOf } from "./lib/import.mjs"
 import { startServer } from "./lib/server.mjs"
 
 const scope = {}
@@ -204,6 +205,108 @@ describe("server", () => {
       expect((await call(svc.port, { path })).status).toBe(200)
     }
     expect((await call(svc.port, { path: "/../package.json" })).status).toBe(404)
+  })
+})
+
+describe("import", () => {
+  const ev = (seq, type, data) => ({ id: `evt_${seq}`, seq, type, createdAt: 1_795_000_000_000 + seq, data })
+  const said = (seq, text, initiator = "user") => ev(seq, "client/turn/requested", { initiator, input: [{ type: "text", text }, { type: "image", url: "x" }] })
+  const answered = (seq, text) => ev(seq, "item/completed", { item: { type: "agentMessage", text } })
+  const thr = { id: "thr_imp1", title: "Fix login", environmentPath: "/home/opc/app", environmentBranchName: "bb/fix", updatedAt: 1 }
+
+  test("keeps what the user typed and what the agent answered", () => {
+    const events = [ev(1, "thread/identity", { providerThreadId: "p-1" }), said(2, "hi"), ev(3, "item/completed", { item: { type: "commandExecution" } }), said(4, "from a thread", "agent"), answered(5, "hello"), answered(6, "  ")]
+    expect(turnsOf(events).map((t) => [t.role, t.text])).toEqual([["user", "hi"], ["assistant", "hello"]])
+    expect(providerIdOf(events)).toBe("p-1")
+    expect(providerIdOf([])).toBeNull()
+  })
+
+  test("a thread becomes a Claude Code session, the same file each time", () => {
+    const s = toSession(thr, [said(1, "hi"), answered(2, "hello")])
+    expect(s.dir).toBe("-home-opc-app")
+    expect(s.name).toBe(`${uuidOf("thr_imp1")}.jsonl`)
+    const [title, user, reply] = s.text.trim().split("\n").map((l) => JSON.parse(l))
+    expect(title).toEqual({ type: "summary", summary: "Fix login" })
+    expect(user).toMatchObject({ type: "user", cwd: "/home/opc/app", gitBranch: "bb/fix", parentUuid: null, message: { role: "user", content: "hi" } })
+    expect(reply).toMatchObject({ type: "assistant", parentUuid: user.uuid, message: { role: "assistant", content: [{ type: "text", text: "hello" }] } })
+    expect(toSession(thr, [said(1, "hi"), answered(2, "hello")]).text).toBe(s.text)
+    expect(toSession(thr, [ev(1, "thread/identity", {})])).toBeNull()
+  })
+
+  test("finds the Claude Code and Codex sessions already on this computer", () => {
+    const home = mkdtempSync(join(tmpdir(), "getbb-home-"))
+    mkdirSync(join(home, ".claude", "projects", "-x"), { recursive: true })
+    writeFileSync(join(home, ".claude", "projects", "-x", "c-1.jsonl"), "")
+    mkdirSync(join(home, ".codex", "sessions", "2026", "11", "18"), { recursive: true })
+    const rollout = join(home, ".codex", "sessions", "2026", "11", "18", "rollout-2026-11-18T20-40-53-01a1f176-c00d-75b2-8f7d-1a7b57ee7abe.jsonl")
+    writeFileSync(rollout, "")
+    const found = nativeSessions(home)
+    rmSync(home, { recursive: true, force: true })
+    expect(found.get("c-1")).toBe(join(home, ".claude", "projects", "-x", "c-1.jsonl"))
+    expect(found.get("01a1f176-c00d-75b2-8f7d-1a7b57ee7abe")).toBe(rollout)
+  })
+
+  test("imports every thread once, leaves this computer's own sessions alone, pages through long threads", async () => {
+    const out = mkdtempSync(join(tmpdir(), "getbb-out-"))
+    const filler = Array.from({ length: 999 }, (_, i) => ev(i + 2, "item/started", {}))
+    const threads = [
+      { ...thr, id: "thr_remote" },
+      { ...thr, id: "thr_here", environmentPath: "/Users/me/x" },
+      { ...thr, id: "thr_empty" },
+      { ...thr, id: "thr_long", archivedAt: 5 },
+    ]
+    const events = {
+      thr_remote: [said(1, "hi"), answered(2, "hello")],
+      thr_here: [ev(1, "thread/identity", { providerThreadId: "native-1" }), said(2, "hi")],
+      thr_empty: [],
+      thr_long: [said(1, "first"), ...filler, answered(1001, "last")],
+    }
+    const calls = []
+    const bb = {
+      run: async (args) => {
+        calls.push(args.join(" "))
+        if (args[1] === "list") return threads
+        const after = Number(args[args.indexOf("--after-seq") + 1])
+        return events[args[2]].filter((e) => e.seq > after).slice(0, Number(args[args.indexOf("--limit") + 1]))
+      },
+    }
+    const ownFile = join(out, "native-1.jsonl")
+    writeFileSync(ownFile, "")
+    const native = new Map([["native-1", ownFile]])
+    const first = await importThreads({ bb, out, native })
+    expect(first).toEqual({ threads: 4, written: 2, native: 1, empty: 1, failed: [] })
+    expect(calls[0]).toBe("thread list --include-archived --include-hidden")
+    expect(calls.filter((c) => c.startsWith("thread messages thr_long"))).toEqual(["thread messages thr_long --limit 1000 --after-seq 0", "thread messages thr_long --limit 1000 --after-seq 1000"])
+    const long = readFileSync(join(out, "projects", "-home-opc-app", `${uuidOf("thr_long")}.jsonl`), "utf8")
+    expect(long).toContain('"last"')
+
+    calls.length = 0
+    expect(await importThreads({ bb, out, native })).toEqual({ threads: 4, written: 0, native: 0, empty: 0, failed: [] })
+    expect(calls).toEqual(["thread list --include-archived --include-hidden"])
+
+    // a deleted file and a changed thread are fetched again; so is a thread
+    // whose own session the agent has since cleaned up
+    rmSync(join(out, "projects", "-home-opc-app", `${uuidOf("thr_remote")}.jsonl`))
+    threads[3] = { ...threads[3], updatedAt: 2 }
+    rmSync(ownFile)
+    expect(await importThreads({ bb, out, native: new Map() })).toMatchObject({ written: 3, native: 0 })
+    rmSync(out, { recursive: true, force: true })
+  })
+
+  test("a thread that fails is reported and tried again next time", async () => {
+    const out = mkdtempSync(join(tmpdir(), "getbb-out-"))
+    let broken = true
+    const bb = {
+      run: async (args) => {
+        if (args[1] === "list") return [thr]
+        if (broken) throw new BbError("timeout", "bb thread messages: timed out")
+        return [said(1, "hi")]
+      },
+    }
+    expect((await importThreads({ bb, out, native: new Map() })).failed).toEqual(["thr_imp1: bb thread messages: timed out"])
+    broken = false
+    expect(await importThreads({ bb, out, native: new Map() })).toMatchObject({ written: 1, failed: [] })
+    rmSync(out, { recursive: true, force: true })
   })
 })
 

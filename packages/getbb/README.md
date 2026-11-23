@@ -42,6 +42,25 @@ If `bb` isn't found, or a command fails, the page shows bb's own error message a
 
 When your bb server runs somewhere else (a `<handle>.getbb.app` server you reach through bb connect), the `bb` CLI must be able to reach it from magpie's environment, the way it does from your terminal. The page shows bb's error if it can't, such as `HTTP 403: bb connect: machine not authorized`.
 
+## Your bb threads in magpie's Sessions and Memory
+
+magpie's Sessions page, `magpie sessions search` and Memory's **Learn from conversations** read the sessions agents keep on this computer. A bb thread that ran on another machine isn't one of them. `import.mjs` writes every bb thread (archived and hidden ones too) as a Claude Code session in `~/.claude-bb/projects`, a folder magpie reads and Claude Code's own `/resume` doesn't:
+
+```sh
+node packages/getbb/import.mjs            # or: node import.mjs <folder> to write somewhere else
+```
+
+- Each file keeps what you typed and what the agent answered, which is all Memory reads, under the thread's title and folder. Tool calls, diffs and images stay in bb.
+- A thread that ran on this computer and still has its Claude Code or Codex session here is left to that session, so it isn't listed twice.
+- A second run fetches only the threads bb says changed, and prints nothing when none did. `~/.claude-bb/bb-import.json` remembers what each thread became.
+- Codex, Kimi and Muse threads are written as Claude Code sessions too, so magpie lists them under Claude Code.
+
+magpie reads them once Claude Code's sessions are allowed: `magpie sessions read on claude`. `bb` must work where it runs, as it does in a bb thread or a bb terminal on this computer. To run it every day from a bb automation, use a script automation that starts it in a terminal on this computer:
+
+```sh
+bb terminal run --machine <this computer> --timeout 14m --json -- node <path>/packages/getbb/import.mjs
+```
+
 ## Tests
 
 ```sh
@@ -58,5 +77,7 @@ bun scripts/check.mjs getbb
 数据全部来自本机的 `bb` 命令行（`bb thread list`、`bb project list --include-personal`、`bb machine list`，打开线程用 `bb thread open`）。
 
 选项：`port`（默认 3498）是页面本地服务的端口；`bbPath` 是 `bb` 的完整路径，留空时依次查找 `$BB_CLI`、`PATH`、`~/.local/bin`、`/opt/homebrew/bin` 和 `/usr/local/bin`。
+
+`node import.mjs` 把所有 bb 线程（包括已归档和隐藏的）写成 Claude Code 会话，放在 `~/.claude-bb/projects`，magpie 的会话页、`magpie sessions search` 和记忆的「从对话中学习」都能读到；需先运行 `magpie sessions read on claude`。只保留你写的和智能体回答的文字；本机已有 Claude Code 或 Codex 会话的线程不重复写入；再次运行只取有变化的线程。
 
 本地服务只监听 `127.0.0.1`，拒绝 `Host` 不是本机端口的请求，每次 API 调用都要带上页面里的随机令牌，`bb thread open` 只接受形如 `thr_…` 的线程 ID。找不到 `bb` 或命令失败时，页面显示 bb 自己的错误信息和重试按钮。bb 服务器在另一台机器上时，magpie 的环境里的 `bb` 命令行要能连上它。
