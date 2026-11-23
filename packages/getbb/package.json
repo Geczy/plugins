@@ -1,0 +1,29 @@
+{
+  "name": "@magpie-community/page-getbb",
+  "version": "0.1.0",
+  "description": "A page in magpie's window with your bb (getbb.app) threads: which are running, which wait for you, which failed, grouped by project, each opened in bb with one click",
+  "type": "module",
+  "main": "./index.mjs",
+  "files": ["index.mjs", "lib", "page", "ui", "README.md"],
+  "keywords": ["magpie", "magpie-page", "magpie-plugin", "bb", "getbb", "agents", "threads"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/magpie-community/plugins.git", "directory": "packages/getbb" },
+  "scripts": { "test": "bun test getbb.test.mjs" },
+  "engines": { "magpie": ">=0.1.1340" },
+  "magpie": {
+    "name": "bb",
+    "summary": {
+      "en": "Your bb (getbb.app) threads in magpie's window: running, waiting for you or failed, by project, each opened in bb with one click. Reads the bb CLI on this computer.",
+      "zh": "在 magpie 窗口里看 bb（getbb.app）的线程：正在运行、等你回复或出错的，按项目分组，一键在 bb 里打开。读取本机的 bb 命令行。"
+    },
+    "page": {
+      "title": "bb threads",
+      "titles": { "zh": "bb 线程", "zh-TW": "bb 執行緒" },
+      "file": "page/index.html",
+      "icon": "page/icon.svg",
+      "service": { "port": 3498, "option": "port" }
+    },
+    "permissions": [],
+    "options": { "port": 3498, "bbPath": "" }
+  }
+}

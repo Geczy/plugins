@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="__GETBB_LANG__" data-theme="__GETBB_THEME__">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="getbb-token" content="__GETBB_TOKEN__">
+  <meta name="getbb-tokens" content="__GETBB_TOKENS__">
+  <title>bb threads</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="view">
+    <header class="head">
+      <h1 id="title">bb threads</h1>
+      <span class="updated" id="updated"></span>
+    </header>
+    <section class="metrics" id="metrics" aria-live="polite"></section>
+    <div class="tools">
+      <div class="chips" id="chips" role="group"></div>
+      <input id="search" type="search" autocomplete="off" spellcheck="false">
+    </div>
+    <p class="notice" id="notice" hidden></p>
+    <section id="list"></section>
+    <footer class="machines" id="machines"></footer>
+  </main>
+  <script src="bridge.js"></script>
+  <script src="view.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
