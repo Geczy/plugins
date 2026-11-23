@@ -366,10 +366,14 @@ describe("import", () => {
     mkdirSync(join(home, ".codex", "sessions", "2026", "11", "18"), { recursive: true })
     const rollout = join(home, ".codex", "sessions", "2026", "11", "18", "rollout-2026-11-18T20-40-53-01a1f176-c00d-75b2-8f7d-1a7b57ee7abe.jsonl")
     writeFileSync(rollout, "")
+    mkdirSync(join(home, ".codex", "archived_sessions"), { recursive: true })
+    const archived = join(home, ".codex", "archived_sessions", "rollout-2026-11-21T08-35-17-01a1fe51-8219-78e3-8511-a4246194b8d5.jsonl")
+    writeFileSync(archived, "")
     const found = nativeSessions(home)
     rmSync(home, { recursive: true, force: true })
     expect(found.get("c-1")).toBe(join(home, ".claude", "projects", "-x", "c-1.jsonl"))
     expect(found.get("01a1f176-c00d-75b2-8f7d-1a7b57ee7abe")).toBe(rollout)
+    expect(found.get("01a1fe51-8219-78e3-8511-a4246194b8d5")).toBe(archived)
   })
 
   test("imports every thread once, leaves this computer's own sessions alone, pages through long threads", async () => {

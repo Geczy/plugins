@@ -8,8 +8,9 @@ import { homedir } from "node:os"
 import { dirname, join, sep } from "node:path"
 
 const PAGE = 1000
-// Raised when what a file holds changes, so every thread is written again once.
-const FORMAT = 3
+// Raised when what a file holds, or which threads get one, changes, so every
+// thread is written again once.
+const FORMAT = 4
 
 // A stable UUID (v5-shaped) from a string, so a re-import rewrites the same file.
 export function uuidOf(s) {
@@ -101,7 +102,8 @@ const list = (d) => {
 
 // Session files magpie already reads on this computer, by the agent's own
 // id: Claude Code's under ~/.claude/projects, Codex's rollouts under
-// ~/.codex/sessions. A thread that ran here is left to these.
+// ~/.codex/sessions and, once archived, ~/.codex/archived_sessions. A
+// thread that ran here is left to these.
 export function nativeSessions(home = homedir()) {
   const found = new Map()
   const claude = join(home, ".claude", "projects")
@@ -114,6 +116,7 @@ export function nativeSessions(home = homedir()) {
     }
   }
   walk(join(home, ".codex", "sessions"))
+  walk(join(home, ".codex", "archived_sessions"))
   return found
 }
 
