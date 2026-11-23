@@ -108,7 +108,7 @@ async function eventsOf(bb, id) {
   }
 }
 
-function writeAtomic(path, text) {
+export function writeAtomic(path, text) {
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(`${path}.tmp`, text)
   renameSync(`${path}.tmp`, path)

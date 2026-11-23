@@ -1,11 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { request } from "node:http"
-import { tmpdir } from "node:os"
+import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import plugin from "./index.mjs"
 import { BbError, findBb, makeBb, slimThread } from "./lib/bb.mjs"
 import { importThreads, nativeSessions, providerIdOf, toSession, turnsOf, uuidOf } from "./lib/import.mjs"
+import { importMemories, makeMagpie, projectEnv, toMemory } from "./lib/memory.mjs"
 import { startServer } from "./lib/server.mjs"
 
 const scope = {}
@@ -345,6 +346,174 @@ describe("import", () => {
     broken = false
     expect(await importThreads({ bb, out, native: new Map() })).toMatchObject({ written: 1, failed: [] })
     rmSync(out, { recursive: true, force: true })
+  })
+})
+
+describe("memory", () => {
+  const mem = (over = {}) => ({ id: "mem_g", scope: "global", projectId: null, name: "g", summary: "Prefers pnpm", kind: "preference", tags: ["js"], version: 1, ...over })
+  const web = { id: "proj_web", sources: [{ type: "local_path", path: "/on/server", isDefault: true }, { type: "local_path", path: "/here/web", isDefault: false }] }
+  const personal = { id: "proj_personal", sources: [] }
+  const here = (p) => p.startsWith("/here/")
+
+  test("bb reads a project's memories with that project named and the thread's taken away", () => {
+    const env = { PATH: "/bin", BB_THREAD_ID: "thr_x", BB_ENVIRONMENT_ID: "env_x", BB_PROJECT_ID: "proj_x" }
+    expect(projectEnv("proj_web", env)).toEqual({ PATH: "/bin", BB_PROJECT_ID: "proj_web" })
+    expect(projectEnv(null, env)).toBe(env)
+  })
+
+  test("a bb memory becomes what memory_save is given", () => {
+    expect(toMemory(mem(), null, { writeReason: "said so" }, here)).toEqual({
+      text: "Prefers pnpm\nFull record: bb memory get mem_g",
+      kind: "preference",
+      scope: "global",
+      project: null,
+      tags: ["js", "bb"],
+      why: "said so",
+    })
+    // a project with a folder on this computer, even when it isn't bb's default
+    expect(toMemory(mem({ id: "mem_w", scope: "project", kind: "decision", tags: ["bb"] }), web, {}, here)).toMatchObject({
+      text: "Prefers pnpm\nFull record: BB_PROJECT_ID=proj_web bb memory get mem_w",
+      kind: "episode",
+      scope: "project",
+      project: "/here/web",
+      tags: ["bb"],
+      why: null,
+    })
+    // Personal and a project with no folder here hold everywhere
+    expect(toMemory(mem({ id: "mem_p", scope: "project", summary: "", name: "pis" }), personal, {}, here)).toMatchObject({ text: "pis\nFull record: BB_PROJECT_ID=proj_personal bb memory get mem_p", scope: "global", project: null })
+    expect(toMemory(mem({ scope: "project" }), { id: "proj_far", sources: [{ type: "local_path", path: "/on/server" }] }, {}, here).scope).toBe("global")
+    expect(toMemory(mem({ kind: "something-new" }), null, {}, here).kind).toBeNull()
+  })
+
+  test("saves every bb memory once, changes the same one, sets aside what bb dropped", async () => {
+    const out = mkdtempSync(join(tmpdir(), "getbb-mem-"))
+    const lists = { global: [mem()], proj_personal: [mem({ id: "mem_p", scope: "project", kind: "decision" })], proj_web: [mem({ id: "mem_w", scope: "project" })] }
+    let broken = null
+    const bbCalls = []
+    const bbFor = (project) => ({
+      run: async (args) => {
+        bbCalls.push(`${project || "-"} ${args.join(" ")}`)
+        if (args[0] === "project") return [personal, web]
+        if (args[1] === "get") return { ok: true, memory: { id: args[2], writeReason: `why ${args[2]}` } }
+        if (project === broken) throw new BbError("timeout", "timed out")
+        const memories = lists[project || "global"]
+        return { ok: true, memories, total: memories.length }
+      },
+    })
+    const saves = []
+    let next = 0
+    let gone = new Set()
+    const magpie = {
+      tool: async (name, params) => {
+        saves.push([name, params])
+        if (params.id && gone.has(params.id)) throw new Error("no memory with that id")
+        if (name === "memory_forget") return `Set aside: [${params.id}]`
+        return params.id ? `Changed: [${params.id}] …` : `Remembered: [m_${(++next).toString(16).padStart(4, "0")}] …`
+      },
+    }
+    const run = () => importMemories({ bbFor, magpie, out, here })
+
+    expect(await run()).toEqual({ memories: 3, saved: 3, changed: 0, forgotten: 0, failed: [] })
+    expect(bbCalls).toContain("proj_web memory catalog --scope project --limit 100")
+    expect(bbCalls).toContain("- memory catalog --scope global --limit 100")
+    expect(bbCalls).toContain("proj_personal memory get mem_p")
+    const byText = Object.fromEntries(saves.map(([, p]) => [p.text.split("\n")[1], p]))
+    expect(byText["Full record: bb memory get mem_g"]).toMatchObject({ scope: "global", why: "why mem_g" })
+    expect(byText["Full record: BB_PROJECT_ID=proj_personal bb memory get mem_p"]).toMatchObject({ scope: "global", kind: "episode" })
+    expect(byText["Full record: BB_PROJECT_ID=proj_web bb memory get mem_w"]).toMatchObject({ scope: "project", project: "/here/web" })
+    const ids = JSON.parse(readFileSync(join(out, "bb-memory.json"), "utf8"))
+    expect(Object.keys(ids).sort()).toEqual(["mem_g", "mem_p", "mem_w"])
+
+    // nothing changed: bb's lists are read, nothing is fetched or saved
+    saves.length = bbCalls.length = 0
+    expect(await run()).toEqual({ memories: 3, saved: 0, changed: 0, forgotten: 0, failed: [] })
+    expect(saves).toEqual([])
+    expect(bbCalls.filter((c) => c.includes("memory get"))).toEqual([])
+
+    // a new version goes into the same magpie memory; one magpie no longer
+    // has is saved anew
+    lists.global = [mem({ version: 2, summary: "Prefers bun" })]
+    lists.proj_web = [mem({ id: "mem_w", scope: "project", version: 2 })]
+    gone = new Set([ids.mem_w.id])
+    saves.length = 0
+    expect(await run()).toMatchObject({ saved: 0, changed: 2, failed: [] })
+    expect(saves.find(([, p]) => p.text.startsWith("Prefers bun"))[1].id).toBe(ids.mem_g.id)
+    expect(saves.filter(([, p]) => p.text.includes("mem_w")).map(([, p]) => p.id)).toEqual([ids.mem_w.id, undefined])
+
+    // while one list can't be read nothing is set aside; once all are, a
+    // memory bb dropped is
+    lists.proj_personal = []
+    broken = "proj_web"
+    saves.length = 0
+    expect(await run()).toMatchObject({ forgotten: 0, failed: ["proj_web: timed out"] })
+    expect(saves).toEqual([])
+    broken = null
+    expect(await run()).toMatchObject({ memories: 2, forgotten: 1, failed: [] })
+    expect(saves).toEqual([["memory_forget", { id: ids.mem_p.id }]])
+    expect(Object.keys(JSON.parse(readFileSync(join(out, "bb-memory.json"), "utf8"))).sort()).toEqual(["mem_g", "mem_w"])
+    rmSync(out, { recursive: true, force: true })
+  })
+
+  test("a memory magpie merged a save into is never changed or set aside from here", async () => {
+    const out = mkdtempSync(join(tmpdir(), "getbb-mem-"))
+    let list = [mem()]
+    const bbFor = () => ({
+      run: async (args) => (args[0] === "project" ? [] : args[1] === "get" ? { memory: {} } : { memories: list, total: list.length }),
+    })
+    const calls = []
+    const magpie = {
+      tool: async (name, params) => {
+        calls.push([name, params.id])
+        return "Already remembered, merged: [m_0abc] preference, everywhere: Prefers pnpm"
+      },
+    }
+    const run = () => importMemories({ bbFor, magpie, out, here })
+    expect(await run()).toMatchObject({ saved: 1, failed: [] })
+    list = [mem({ version: 2 })]
+    expect(await run()).toMatchObject({ changed: 1, failed: [] })
+    list = []
+    expect(await run()).toMatchObject({ forgotten: 0, failed: [] })
+    expect(calls).toEqual([["memory_save", undefined], ["memory_save", undefined]])
+    expect(JSON.parse(readFileSync(join(out, "bb-memory.json"), "utf8"))).toEqual({})
+    rmSync(out, { recursive: true, force: true })
+  })
+
+  test("a list bb cut short, or magpie refusing, is reported and tried again", async () => {
+    const out = mkdtempSync(join(tmpdir(), "getbb-mem-"))
+    let total = 150
+    const bbFor = () => ({
+      run: async (args) => (args[0] === "project" ? [] : args[1] === "get" ? { memory: {} } : { memories: [mem()], total }),
+    })
+    let refuse = true
+    const magpie = { tool: async () => (refuse ? Promise.reject(new Error("magpie isn't running")) : "Remembered: [m_00ff] …") }
+    expect((await importMemories({ bbFor, magpie, out, here })).failed).toEqual(["global: 150 memories, only the first 1 read", "mem_g: magpie isn't running"])
+    refuse = false
+    total = 1
+    expect(await importMemories({ bbFor, magpie, out, here })).toMatchObject({ saved: 1, failed: [] })
+    rmSync(out, { recursive: true, force: true })
+  })
+
+  test("magpie tool gets each parameter as --name=value, a list once per item, from the home folder", async () => {
+    const bin = join(dir, "magpie")
+    writeFileSync(
+      bin,
+      `#!/bin/sh
+pwd > "${dir}/magpie-args"
+printf '%s\\n' "$@" >> "${dir}/magpie-args"
+case "$2" in
+  memory_save) echo '{"content":[{"type":"text","text":"Remembered: [m_abc] fact"}],"isError":false}' ;;
+  *) echo '{"content":[{"type":"text","text":"no memory with that id"}],"isError":true}' ; exit 1 ;;
+esac
+`,
+    )
+    chmodSync(bin, 0o755)
+    const magpie = makeMagpie({ bin })
+    expect(await magpie.tool("memory_save", { text: "--looks like a flag", kind: "fact", project: null, tags: ["a", "bb"], why: "" })).toBe("Remembered: [m_abc] fact")
+    const [cwd, ...args] = readFileSync(join(dir, "magpie-args"), "utf8").trim().split("\n")
+    expect(realpathSync(cwd)).toBe(realpathSync(homedir()))
+    expect(args).toEqual(["tool", "memory_save", "--text=--looks like a flag", "--kind=fact", "--tags=a", "--tags=bb", "--json"])
+    expect((await magpie.tool("memory_forget", { id: "m_x" }).catch((e) => e)).message).toBe("no memory with that id")
+    expect((await makeMagpie({ bin: null }).tool("memory_save", {}).catch((e) => e)).message).toContain("isn't installed")
   })
 })
 

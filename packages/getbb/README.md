@@ -56,7 +56,18 @@ node packages/getbb/import.mjs            # or: node import.mjs <folder> to writ
 - A second run fetches only the threads bb says changed, and prints nothing when none did. `~/.claude-bb/bb-import.json` remembers what each thread became.
 - Codex, Kimi and Muse threads are written as Claude Code sessions too, so magpie lists them under Claude Code.
 
-magpie reads them once Claude Code's sessions are allowed: `magpie sessions read on claude`. `bb` must work where it runs, as it does in a bb thread or a bb terminal on this computer. To run it every day from a bb automation, use a script automation that starts it in a terminal on this computer:
+magpie reads them once Claude Code's sessions are allowed: `magpie sessions read on claude`.
+
+### bb's memories in magpie's Memory
+
+magpie never reads an agent's own memory files. Claude Code and Codex add to Memory through magpie's `memory_save` tool, and `import.mjs` saves every bb memory (`bb memory`) the same way after the threads, with `magpie tool memory_save`. Each one is an agent's memory, given to every agent at once, which Memory's nightly tidy may merge or set aside like any other.
+
+- The text is bb's summary and the command that prints the whole record, such as `BB_PROJECT_ID=proj_personal bb memory get mem_…`. The details stay in bb, so the digest magpie gives agents has room for more memories. bb's reason for keeping it becomes the memory's *why*, its tags gain `bb`, and a bb `decision` becomes an `episode`.
+- A project's memory belongs to that project's folder on this computer, wherever bb has one. bb's global memories, Personal's, and those of a project with no folder here hold everywhere.
+- A memory bb changed goes into the same magpie memory, and one bb deleted is set aside in magpie. Nothing is set aside on a run where a list couldn't be read whole. `~/.claude-bb/bb-memory.json` remembers which magpie memory each became.
+- magpie must be running. A run where it isn't reports the memories as failed and saves them the next time.
+
+`bb` must work where it runs, as it does in a bb thread or a bb terminal on this computer. To run it every day from a bb automation, use a script automation that starts it in a terminal on this computer:
 
 ```sh
 bb terminal run --machine <this computer> --timeout 14m --json -- node <path>/packages/getbb/import.mjs
@@ -79,6 +90,6 @@ bun scripts/check.mjs getbb
 
 选项：`port`（默认 3498）是页面本地服务的端口；`bbPath` 是 `bb` 的完整路径，留空时依次查找 `$BB_CLI`、`PATH`、`~/.local/bin`、`/opt/homebrew/bin` 和 `/usr/local/bin`。
 
-`node import.mjs` 把所有 bb 线程（包括已归档和隐藏的）写成 Claude Code 会话，放在 `~/.claude-bb/projects`，magpie 的会话页、`magpie sessions search` 和记忆的「从对话中学习」都能读到；需先运行 `magpie sessions read on claude`。只保留你写的和智能体回答的文字，插件或父线程智能体写的提示不算作你的话；本机已有 Claude Code 或 Codex 会话的线程不重复写入；再次运行只取有变化的线程。
+`node import.mjs` 把所有 bb 线程（包括已归档和隐藏的）写成 Claude Code 会话，放在 `~/.claude-bb/projects`，magpie 的会话页、`magpie sessions search` 和记忆的「从对话中学习」都能读到；需先运行 `magpie sessions read on claude`。只保留你写的和智能体回答的文字，插件或父线程智能体写的提示不算作你的话；本机已有 Claude Code 或 Codex 会话的线程不重复写入；再次运行只取有变化的线程。之后它用 `magpie tool memory_save` 把每条 bb 记忆（`bb memory`）存进 magpie 的记忆，和 Claude Code、Codex 存记忆的方式一样：内容是 bb 的摘要和查看完整记录的命令，项目记忆归到该项目在本机的文件夹（没有文件夹的和 Personal 的对所有项目生效）；bb 改了的记忆更新同一条，bb 删掉的在 magpie 里搁置。运行时 magpie 需要开着。
 
 本地服务只监听 `127.0.0.1`，拒绝 `Host` 不是本机端口的请求，每次 API 调用都要带上页面里的随机令牌，`bb thread open` 只接受形如 `thr_…` 的线程 ID。找不到 `bb` 或命令失败时，页面显示 bb 自己的错误信息和重试按钮。bb 服务器在另一台机器上时，magpie 的环境里的 `bb` 命令行要能连上它。

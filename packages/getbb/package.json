@@ -1,7 +1,7 @@
 {
   "name": "@magpie-community/page-getbb",
-  "version": "0.2.1",
-  "description": "A page in magpie's window with your bb (getbb.app) threads: which are running, which wait for you, which failed, grouped by project, each opened in bb with one click; import.mjs puts every bb thread in magpie's Sessions and Memory",
+  "version": "0.3.0",
+  "description": "A page in magpie's window with your bb (getbb.app) threads: which are running, which wait for you, which failed, grouped by project, each opened in bb with one click; import.mjs puts every bb thread in magpie's Sessions and Memory, and every bb memory in Memory",
   "type": "module",
   "main": "./index.mjs",
   "files": ["index.mjs", "import.mjs", "lib", "page", "ui", "README.md"],
