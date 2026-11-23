@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import plugin from "./index.mjs"
 import { BbError, findBb, makeBb, slimThread } from "./lib/bb.mjs"
-import { importThreads, nativeSessions, providerIdOf, toSession, turnsOf, uuidOf } from "./lib/import.mjs"
+import { folderOf, foldersHere, importThreads, nativeSessions, providerIdOf, toSession, turnsOf, uuidOf } from "./lib/import.mjs"
 import { importMemories, makeMagpie, projectEnv, toMemory } from "./lib/memory.mjs"
 import { startServer } from "./lib/server.mjs"
 
@@ -213,7 +213,9 @@ describe("import", () => {
   const ev = (seq, type, data) => ({ id: `evt_${seq}`, seq, type, createdAt: 1_795_000_000_000 + seq, data })
   const said = (seq, text, initiator = "user") => ev(seq, "client/turn/requested", { initiator, input: [{ type: "text", text }, { type: "image", url: "x" }] })
   const answered = (seq, text) => ev(seq, "item/completed", { item: { type: "agentMessage", text } })
-  const thr = { id: "thr_imp1", title: "Fix login", environmentPath: "/home/opc/app", environmentBranchName: "bb/fix", updatedAt: 1 }
+  const thr = { id: "thr_imp1", projectId: "p_app", title: "Fix login", environmentPath: "/home/opc/app", environmentBranchName: "bb/fix", updatedAt: 1 }
+  const app = { id: "p_app", sources: [{ type: "local_path", path: "/home/opc/app", isDefault: true }] }
+  const here = (p) => p.startsWith("/home/opc/")
 
   test("keeps what the user typed and what the agent answered", () => {
     const events = [ev(1, "thread/identity", { providerThreadId: "p-1" }), said(2, "hi"), ev(3, "item/completed", { item: { type: "commandExecution" } }), said(4, "from a thread", "agent"), answered(5, "hello"), answered(6, "  ")]
@@ -249,6 +251,51 @@ describe("import", () => {
     expect(toSession(thr, [ev(1, "thread/identity", {})])).toBeNull()
   })
 
+  test("a thread is filed under its project's folder on this computer, else the home folder", () => {
+    const web = { id: "p_web", sources: [{ type: "local_path", path: "/srv/web", isDefault: true }, { type: "local_path", path: "/Users/me/web", isDefault: false }] }
+    const mine = (p) => p.startsWith("/Users/me/")
+    const at = (environmentPath, project = web) => folderOf({ environmentPath }, project, mine, "/Users/me")
+    // where it ran, when that's the project's folder here or inside it
+    expect(at("/Users/me/web")).toBe("/Users/me/web")
+    expect(at("/Users/me/web/packages/a")).toBe("/Users/me/web/packages/a")
+    // on the server, in a worktree elsewhere, nowhere known: the project's folder here
+    expect(at("/srv/web")).toBe("/Users/me/web")
+    expect(at("/Users/me/.bb/worktrees/web-fix")).toBe("/Users/me/web")
+    expect(at("/Users/me/webby")).toBe("/Users/me/web")
+    expect(at(null)).toBe("/Users/me/web")
+    // Personal, a project with no folder here, a project bb didn't list: home
+    expect(at("/Users/me/x/thr_1", { id: "proj_personal", sources: [] })).toBe("/Users/me")
+    expect(at("/srv/far", { id: "p_far", sources: [{ type: "local_path", path: "/srv/far", isDefault: true }] })).toBe("/Users/me")
+    expect(at("/Users/me/web", null)).toBe("/Users/me")
+    const two = { sources: [{ type: "local_path", path: "/Users/me/b", isDefault: false }, { type: "local_path", path: "/Users/me/a", isDefault: true }, { type: "git", path: "/Users/me/c" }] }
+    expect(foldersHere(two, mine)).toEqual(["/Users/me/a", "/Users/me/b"])
+  })
+
+  test("moves a thread's file once when its project gets a folder on this computer", async () => {
+    const out = mkdtempSync(join(tmpdir(), "getbb-out-"))
+    const calls = []
+    const bb = {
+      run: async (args) => {
+        calls.push(`${args[0]} ${args[1]}`)
+        return args[0] === "project" ? [app] : args[1] === "list" ? [thr] : [said(1, "hi")]
+      },
+    }
+    let cloned = false
+    const run = () => importThreads({ bb, out, here, native: new Map(), here: () => cloned, home: "/Users/me" })
+    expect(await run()).toMatchObject({ written: 1 })
+    const before = join(out, "projects", "-Users-me", `${uuidOf("thr_imp1")}.jsonl`)
+    expect(readFileSync(before, "utf8")).toContain('"cwd":"/Users/me"')
+    cloned = true
+    expect(await run()).toMatchObject({ written: 1 })
+    expect(existsSync(before)).toBe(false)
+    expect(existsSync(join(out, "projects", "-Users-me"))).toBe(false)
+    expect(readFileSync(join(out, "projects", "-home-opc-app", `${uuidOf("thr_imp1")}.jsonl`), "utf8")).toContain('"cwd":"/home/opc/app"')
+    calls.length = 0
+    expect(await run()).toMatchObject({ written: 0 })
+    expect(calls).toEqual(["thread list", "project list"])
+    rmSync(out, { recursive: true, force: true })
+  })
+
   test("finds the Claude Code and Codex sessions already on this computer", () => {
     const home = mkdtempSync(join(tmpdir(), "getbb-home-"))
     mkdirSync(join(home, ".claude", "projects", "-x"), { recursive: true })
@@ -281,6 +328,7 @@ describe("import", () => {
     const bb = {
       run: async (args) => {
         calls.push(args.join(" "))
+        if (args[0] === "project") return [app]
         if (args[1] === "list") return threads
         const after = Number(args[args.indexOf("--after-seq") + 1])
         return events[args[2]].filter((e) => e.seq > after).slice(0, Number(args[args.indexOf("--limit") + 1]))
@@ -289,7 +337,7 @@ describe("import", () => {
     const ownFile = join(out, "native-1.jsonl")
     writeFileSync(ownFile, "")
     const native = new Map([["native-1", ownFile]])
-    const first = await importThreads({ bb, out, native })
+    const first = await importThreads({ bb, out, here, native })
     expect(first).toEqual({ threads: 4, written: 2, native: 1, empty: 1, failed: [] })
     expect(calls[0]).toBe("thread list --include-archived --include-hidden")
     expect(calls.filter((c) => c.startsWith("thread messages thr_long"))).toEqual(["thread messages thr_long --limit 1000 --after-seq 0", "thread messages thr_long --limit 1000 --after-seq 1000"])
@@ -297,15 +345,15 @@ describe("import", () => {
     expect(long).toContain('"last"')
 
     calls.length = 0
-    expect(await importThreads({ bb, out, native })).toEqual({ threads: 4, written: 0, native: 0, empty: 0, failed: [] })
-    expect(calls).toEqual(["thread list --include-archived --include-hidden"])
+    expect(await importThreads({ bb, out, here, native })).toEqual({ threads: 4, written: 0, native: 0, empty: 0, failed: [] })
+    expect(calls).toEqual(["thread list --include-archived --include-hidden", "project list --include-personal"])
 
     // a deleted file and a changed thread are fetched again; so is a thread
     // whose own session the agent has since cleaned up
     rmSync(join(out, "projects", "-home-opc-app", `${uuidOf("thr_remote")}.jsonl`))
     threads[3] = { ...threads[3], updatedAt: 2 }
     rmSync(ownFile)
-    expect(await importThreads({ bb, out, native: new Map() })).toMatchObject({ written: 3, native: 0 })
+    expect(await importThreads({ bb, out, here, native: new Map() })).toMatchObject({ written: 3, native: 0 })
     rmSync(out, { recursive: true, force: true })
   })
 
@@ -317,16 +365,16 @@ describe("import", () => {
     writeFileSync(join(out, "bb-import.json"), JSON.stringify({ thr_imp1: { updatedAt: 1, path: file } }))
     const threads = [thr]
     let events = [said(1, "hi"), answered(2, "hello")]
-    const bb = { run: async (args) => (args[1] === "list" ? threads : events) }
-    expect(await importThreads({ bb, out, native: new Map() })).toMatchObject({ written: 1 })
+    const bb = { run: async (args) => (args[0] === "project" ? [app] : args[1] === "list" ? threads : events) }
+    expect(await importThreads({ bb, out, here, native: new Map() })).toMatchObject({ written: 1 })
     expect(readFileSync(file, "utf8")).toContain('"hello"')
-    expect(await importThreads({ bb, out, native: new Map() })).toMatchObject({ written: 0 })
+    expect(await importThreads({ bb, out, here, native: new Map() })).toMatchObject({ written: 0 })
 
     const ownFile = join(out, "native-1.jsonl")
     writeFileSync(ownFile, "")
     events = [ev(0, "thread/identity", { providerThreadId: "native-1" }), ...events]
     threads[0] = { ...thr, updatedAt: 2 }
-    expect(await importThreads({ bb, out, native: new Map([["native-1", ownFile]]) })).toMatchObject({ native: 1 })
+    expect(await importThreads({ bb, out, here, native: new Map([["native-1", ownFile]]) })).toMatchObject({ native: 1 })
     expect(existsSync(file)).toBe(false)
     expect(existsSync(ownFile)).toBe(true)
     rmSync(out, { recursive: true, force: true })
@@ -337,14 +385,15 @@ describe("import", () => {
     let broken = true
     const bb = {
       run: async (args) => {
+        if (args[0] === "project") return [app]
         if (args[1] === "list") return [thr]
         if (broken) throw new BbError("timeout", "bb thread messages: timed out")
         return [said(1, "hi")]
       },
     }
-    expect((await importThreads({ bb, out, native: new Map() })).failed).toEqual(["thr_imp1: bb thread messages: timed out"])
+    expect((await importThreads({ bb, out, here, native: new Map() })).failed).toEqual(["thr_imp1: bb thread messages: timed out"])
     broken = false
-    expect(await importThreads({ bb, out, native: new Map() })).toMatchObject({ written: 1, failed: [] })
+    expect(await importThreads({ bb, out, here, native: new Map() })).toMatchObject({ written: 1, failed: [] })
     rmSync(out, { recursive: true, force: true })
   })
 })
@@ -404,6 +453,7 @@ describe("memory", () => {
     let next = 0
     let gone = new Set()
     const magpie = {
+      status: (id) => (gone.has(id) ? null : "active"),
       tool: async (name, params) => {
         saves.push([name, params])
         if (params.id && gone.has(params.id)) throw new Error("no memory with that id")
@@ -476,6 +526,57 @@ describe("memory", () => {
     expect(calls).toEqual([["memory_save", undefined], ["memory_save", undefined]])
     expect(JSON.parse(readFileSync(join(out, "bb-memory.json"), "utf8"))).toEqual({})
     rmSync(out, { recursive: true, force: true })
+  })
+
+  test("a memory tidy merged is left as it is and bb's change saved anew; one set aside stays aside", async () => {
+    const out = mkdtempSync(join(tmpdir(), "getbb-mem-"))
+    const fish = (over) => mem({ id: "mem_h", summary: "Uses fish", ...over })
+    let list = [mem(), fish()]
+    const bbFor = () => ({
+      run: async (args) => (args[0] === "project" ? [] : args[1] === "get" ? { memory: {} } : { memories: list, total: list.length }),
+    })
+    const calls = []
+    const status = {}
+    let next = 0
+    const magpie = {
+      status: (id) => status[id] || "active",
+      tool: async (name, params) => {
+        calls.push([name, params.id])
+        return params.id ? `Changed: [${params.id}] …` : `Remembered: [m_${(++next).toString(16).padStart(4, "0")}] …`
+      },
+    }
+    const run = () => importMemories({ bbFor, magpie, out, here })
+    const ids = () => JSON.parse(readFileSync(join(out, "bb-memory.json"), "utf8"))
+    expect(await run()).toMatchObject({ saved: 2, failed: [] })
+    const was = ids()
+    status[was.mem_g.id] = "superseded"
+    status[was.mem_h.id] = "archived"
+
+    list = [mem({ version: 2 }), fish({ version: 2 })]
+    calls.length = 0
+    expect(await run()).toMatchObject({ changed: 1, failed: [] })
+    expect(calls).toEqual([["memory_save", undefined]])
+    expect(ids().mem_g.id).toBe("m_0003")
+    expect(ids().mem_h).toEqual({ ...was.mem_h, version: 2 })
+
+    // bb dropping them sets neither aside: one is merged, one already aside
+    status.m_0003 = "superseded"
+    list = []
+    calls.length = 0
+    expect(await run()).toMatchObject({ forgotten: 0, failed: [] })
+    expect(calls).toEqual([])
+    expect(ids()).toEqual({})
+    rmSync(out, { recursive: true, force: true })
+  })
+
+  test("magpie status is read from the memory file's front matter", () => {
+    const memoryDir = mkdtempSync(join(tmpdir(), "getbb-magpie-"))
+    writeFileSync(join(memoryDir, "m_0abc.md"), "---\nkind: fact\nstatus: superseded\nsupersededBy: m_0def\n---\nstatus: active\n")
+    const magpie = makeMagpie({ bin: null, memoryDir })
+    expect(magpie.status("m_0abc")).toBe("superseded")
+    expect(magpie.status("m_0def")).toBeNull()
+    expect(magpie.status("../m_0abc")).toBeNull()
+    rmSync(memoryDir, { recursive: true, force: true })
   })
 
   test("a list bb cut short, or magpie refusing, is reported and tried again", async () => {

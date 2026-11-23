@@ -6,8 +6,8 @@
 import { execFile } from "node:child_process"
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
-import { delimiter, join } from "node:path"
-import { writeAtomic } from "./import.mjs"
+import { delimiter, isAbsolute, join } from "node:path"
+import { foldersHere, writeAtomic } from "./import.mjs"
 
 // Raised when what a memory is saved as changes, so every one is saved again once.
 const FORMAT = 1
@@ -17,6 +17,9 @@ const LIMIT = 100
 const KINDS = { decision: "episode" }
 const MAGPIE_KINDS = new Set(["profile", "preference", "rule", "reference", "fact", "procedure", "episode"])
 const GONE = /no memory with that id/i
+// What tidy (or the user) did with a memory: merged into another, or set aside.
+const MERGED = "superseded"
+const ASIDE = "archived"
 
 const isFile = (p) => {
   try {
@@ -32,12 +35,27 @@ export function findMagpie(env = process.env) {
   return [...dirs.map((d) => join(d, name)), "/Applications/magpie.app/Contents/MacOS/magpie"].find(isFile) || null
 }
 
+// magpie keeps each memory in <config>/memory/<id>.md, its status in the
+// front matter; <config> is $XDG_CONFIG_HOME/magpie, or ~/.config/magpie.
+const memoryDirOf = (env = process.env) => join(isAbsolute(env.XDG_CONFIG_HOME || "") ? env.XDG_CONFIG_HOME : join(homedir(), ".config"), "magpie", "memory")
+
 // `magpie tool <name> --<param>=<value>… --json` through the running magpie,
 // as an agent's MCP call is. Resolves with the tool's text, rejects with it
 // when the tool says it failed. It runs in the home folder, the folder magpie
-// records the memory came from.
-export function makeMagpie({ bin = findMagpie(), timeoutMs = 120_000 } = {}) {
+// records the memory came from. status(id) is a memory's status (active,
+// candidate, archived, superseded), which no tool reports; null when magpie
+// has no such memory.
+export function makeMagpie({ bin = findMagpie(), timeoutMs = 120_000, memoryDir = memoryDirOf() } = {}) {
   return {
+    status(id) {
+      if (!/^m_[0-9a-f]+$/.test(id)) return null
+      try {
+        const head = readFileSync(join(memoryDir, `${id}.md`), "utf8").split("\n---\n")[0]
+        return /^status:\s*"?(\w+)/m.exec(head)?.[1] || null
+      } catch {
+        return null
+      }
+    },
     tool(name, params) {
       if (!bin) return Promise.reject(new Error("magpie isn't installed on PATH, in ~/.local/bin or in /Applications"))
       const args = Object.entries(params).flatMap(([k, v]) => (v == null || v === "" ? [] : [v].flat().map((x) => `--${k}=${x}`)))
@@ -71,15 +89,14 @@ export function projectEnv(projectId, env = process.env) {
 // with no folder here, holds everywhere. The text is bb's summary and how to
 // read the whole record, so the details stay out of magpie's digest.
 export function toMemory(m, project, full = {}, here = existsSync) {
-  const dirs = m.scope === "project" ? (project?.sources || []).filter((s) => s.type === "local_path" && s.path && here(s.path)) : []
-  const dir = dirs.find((s) => s.isDefault) || dirs[0]
+  const dir = m.scope === "project" ? foldersHere(project, here)[0] : null
   const get = m.scope === "project" && project ? `BB_PROJECT_ID=${project.id} bb memory get ${m.id}` : `bb memory get ${m.id}`
   const kind = KINDS[m.kind] || m.kind
   return {
     text: `${m.summary || m.name}\nFull record: ${get}`,
     kind: MAGPIE_KINDS.has(kind) ? kind : null,
     scope: dir ? "project" : "global",
-    project: dir?.path || null,
+    project: dir || null,
     tags: [...new Set([...(m.tags || []), "bb"])],
     why: full.writeReason || null,
   }
@@ -126,11 +143,18 @@ export async function importMemories({ bbFor, magpie, out = join(homedir(), ".cl
   for (const { m, project } of found.values()) {
     const was = state[m.id]
     if (was && was.version === m.version && was.format === FORMAT) continue
+    // One tidy or the user set aside stays aside. One tidy merged into
+    // another is left as it is, and bb's change saved as a new memory.
+    const status = was?.id ? magpie.status(was.id) : null
+    if (status === ASIDE) {
+      state[m.id] = { ...was, format: FORMAT, version: m.version }
+      continue
+    }
     try {
       const full = (await bbFor(project?.id).run(["memory", "get", m.id])).memory || {}
       const params = toMemory(m, project, full, here)
       let reply
-      if (was?.id) {
+      if (was?.id && status !== MERGED) {
         try {
           reply = await magpie.tool("memory_save", { ...params, id: was.id })
         } catch (e) {
@@ -156,7 +180,8 @@ export async function importMemories({ bbFor, magpie, out = join(homedir(), ".cl
     for (const [bbId, was] of Object.entries(state)) {
       if (found.has(bbId)) continue
       try {
-        if (was.id) {
+        const status = was.id ? magpie.status(was.id) : null
+        if (was.id && status !== MERGED && status !== ASIDE) {
           await magpie.tool("memory_forget", { id: was.id }).catch((e) => {
             if (!GONE.test(e.message)) throw e
           })

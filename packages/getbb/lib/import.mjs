@@ -3,7 +3,7 @@
 // any ~/.claude* folder that has a projects/ folder (appdir.ClaudeHomesIn);
 // Claude Code itself reads only ~/.claude, so its /resume never sees these.
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join, sep } from "node:path"
 
@@ -48,13 +48,32 @@ export function providerIdOf(events) {
   return events.find((e) => e.type === "thread/identity" && e.data?.providerThreadId)?.data.providerThreadId || null
 }
 
-// The session file for a thread: its folder under projects/, its name and
-// its lines. null when the thread has nothing anyone wrote.
-export function toSession(thread, events) {
+// A project's folders on this computer, its default one first.
+export function foldersHere(project, here = existsSync) {
+  const dirs = (project?.sources || []).filter((s) => s.type === "local_path" && s.path && here(s.path))
+  return [...dirs.filter((s) => s.isDefault), ...dirs.filter((s) => !s.isDefault)].map((s) => s.path)
+}
+
+// The folder a thread's session is filed under, which is the project magpie
+// learns it for: the folder the thread ran in when that is one of its
+// project's folders on this computer, else the project's folder here, else
+// the home folder (Personal, and a project with no folder here).
+export function folderOf(thread, project, here = existsSync, home = homedir()) {
+  const dirs = foldersHere(project, here)
+  const ran = thread.environmentPath
+  if (ran && dirs.some((d) => ran === d || ran.startsWith(d + sep))) return ran
+  return dirs[0] || home
+}
+
+const dirOf = (cwd) => cwd.replace(/[^A-Za-z0-9]/g, "-")
+
+// The session file for a thread, filed under cwd: its folder under
+// projects/, its name and its lines. null when the thread has nothing
+// anyone wrote.
+export function toSession(thread, events, cwd = thread.environmentPath || "/") {
   const turns = turnsOf(events, thread)
   if (!turns.length) return null
   const sessionId = uuidOf(thread.id)
-  const cwd = thread.environmentPath || "/"
   let parent = null
   const lines = turns.map((t) => {
     const uuid = uuidOf(`${thread.id}:${t.key}`)
@@ -66,7 +85,7 @@ export function toSession(thread, events) {
   })
   const title = { type: "summary", summary: thread.title || thread.titleFallback || thread.id }
   return {
-    dir: cwd.replace(/[^A-Za-z0-9]/g, "-"),
+    dir: dirOf(cwd),
     name: `${sessionId}.jsonl`,
     text: [title, ...lines].map((l) => JSON.stringify(l)).join("\n") + "\n",
   }
@@ -115,11 +134,11 @@ export function writeAtomic(path, text) {
 }
 
 // Brings out/projects up to date with bb: every thread, archived and hidden
-// ones too. A thread is fetched again only when bb says it changed or its
-// file is gone. out/bb-import.json remembers what each thread became. A file
-// this wrote earlier goes when its thread now has a native session, nothing
-// left to keep, or another folder.
-export async function importThreads({ bb, out = join(homedir(), ".claude-bb"), native = nativeSessions(), workers = 4 }) {
+// ones too. A thread is fetched again only when bb says it changed, its file
+// is gone, or it now belongs in another folder. out/bb-import.json remembers
+// what each thread became. A file this wrote earlier goes when its thread now
+// has a native session, nothing left to keep, or another folder.
+export async function importThreads({ bb, out = join(homedir(), ".claude-bb"), native = nativeSessions(), workers = 4, here = existsSync, home = homedir() }) {
   const stateFile = join(out, "bb-import.json")
   const ours = join(out, "projects") + sep
   let state = {}
@@ -127,9 +146,12 @@ export async function importThreads({ bb, out = join(homedir(), ".claude-bb"), n
     state = JSON.parse(readFileSync(stateFile, "utf8"))
   } catch {}
   const threads = await bb.run(["thread", "list", "--include-archived", "--include-hidden"])
+  const projects = new Map((await bb.run(["project", "list", "--include-personal"])).map((p) => [p.id, p]))
+  const cwd = new Map(threads.map((t) => [t.id, folderOf(t, projects.get(t.projectId), here, home)]))
   const due = threads.filter((t) => {
     const was = state[t.id]
-    return !was || was.format !== FORMAT || was.updatedAt !== t.updatedAt || (was.path && !existsSync(was.path))
+    const moved = was?.path?.startsWith(ours) && was.path !== join(out, "projects", dirOf(cwd.get(t.id)), `${uuidOf(t.id)}.jsonl`)
+    return !was || was.format !== FORMAT || was.updatedAt !== t.updatedAt || (was.path && !existsSync(was.path)) || moved
   })
   const counts = { threads: threads.length, written: 0, native: 0, empty: 0, failed: [] }
   const queue = [...due]
@@ -138,11 +160,17 @@ export async function importThreads({ bb, out = join(homedir(), ".claude-bb"), n
       try {
         const events = await eventsOf(bb, t.id)
         const own = native.get(providerIdOf(events))
-        const s = own ? null : toSession(t, events)
+        const s = own ? null : toSession(t, events, cwd.get(t.id))
         const path = own || (s && join(out, "projects", s.dir, s.name))
         if (s) writeAtomic(path, s.text)
         const was = state[t.id]?.path
-        if (was && was !== path && was.startsWith(ours)) rmSync(was, { force: true })
+        if (was && was !== path && was.startsWith(ours)) {
+          rmSync(was, { force: true })
+          // and its folder, when that was the last file in it
+          try {
+            rmdirSync(dirname(was))
+          } catch {}
+        }
         counts[own ? "native" : s ? "written" : "empty"]++
         state[t.id] = { format: FORMAT, updatedAt: t.updatedAt, path: path || null }
       } catch (e) {
