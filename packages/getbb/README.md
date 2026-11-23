@@ -24,7 +24,7 @@ Then open **bb threads** under Plugins in magpie's sidebar.
 | Option | Default | What it does |
 | --- | --- | --- |
 | `port` | `3498` | The loopback port of the page's local service |
-| `bbPath` | empty | Full path to the `bb` binary. When empty, the plugin tries `$BB_CLI`, then `PATH`, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`, since magpie started from the Dock has a short `PATH` |
+| `bbPath` | empty | Full path to the `bb` binary, run as it is. When empty, the plugin first looks for bb's host daemon on this computer (see [A bb server on another machine](#a-bb-server-on-another-machine)), then tries `$BB_CLI`, then `PATH`, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`, since magpie started from the Dock has a short `PATH` |
 
 ## How it works
 
@@ -40,7 +40,13 @@ If `bb` isn't found, or a command fails, the page shows bb's own error message a
 
 ### A bb server on another machine
 
-When your bb server runs somewhere else (a `<handle>.getbb.app` server you reach through bb connect), the `bb` CLI must be able to reach it from magpie's environment, the way it does from your terminal. The page shows bb's error if it can't, such as `HTTP 403: bb connect: machine not authorized`.
+When your bb server runs somewhere else (a `<handle>.getbb.app` server you reach through bb connect), bb's own threads reach it through the bb host daemon on this computer. The daemon runs a loopback proxy that adds this computer's credentials, and bb hands its address (`BB_SERVER_URL`) and the bb build beside the daemon (`BB_CLI`) to its threads and terminals. magpie started from the Dock gets neither, so when `bbPath` is empty and `BB_SERVER_URL` isn't set, the plugin finds them:
+
+- It reads the daemon's port from `~/.bb-machines/<server>/host-daemon-port`, and with `lsof` finds the process listening there, the node it runs on and the other loopback ports it listens on.
+- It runs that folder's `npm/lib/node_modules/bb-app/host-daemon/dist/bb` with that node, tries each port as `BB_SERVER_URL` with `bb project list`, and keeps the first that answers.
+- After a command through them fails it looks again, since the daemon listens on a new port when it restarts.
+
+It never reads the credentials: the daemon adds them. bb documents none of this, so a bb update may change it, and the page then shows bb's error, such as `HTTP 403: bb connect: machine not authorized`. Setting `bbPath` turns the lookup off.
 
 ## Your bb threads in magpie's Sessions and Memory
 
@@ -90,8 +96,8 @@ bun scripts/check.mjs getbb
 
 数据全部来自本机的 `bb` 命令行（`bb thread list`、`bb project list --include-personal`、`bb machine list`，打开线程用 `bb thread open`）。
 
-选项：`port`（默认 3498）是页面本地服务的端口；`bbPath` 是 `bb` 的完整路径，留空时依次查找 `$BB_CLI`、`PATH`、`~/.local/bin`、`/opt/homebrew/bin` 和 `/usr/local/bin`。
+选项：`port`（默认 3498）是页面本地服务的端口；`bbPath` 是 `bb` 的完整路径，留空时先找本机的 bb 主机守护进程（见下），再依次查找 `$BB_CLI`、`PATH`、`~/.local/bin`、`/opt/homebrew/bin` 和 `/usr/local/bin`。
 
 `node import.mjs` 把所有 bb 线程（包括已归档和隐藏的）写成 Claude Code 会话，放在 `~/.claude-bb/projects` 下该线程所属项目在本机的文件夹里（Personal 的线程和本机没有文件夹的项目的线程放在主文件夹下），magpie 的会话页、`magpie sessions search` 和记忆的「从对话中学习」都能读到；需先运行 `magpie sessions read on claude`。只保留你写的和智能体回答的文字，插件或父线程智能体写的提示不算作你的话；本机已有 Claude Code 或 Codex 会话的线程不重复写入；再次运行只取有变化的线程。之后它用 `magpie tool memory_save` 把每条 bb 记忆（`bb memory`）存进 magpie 的记忆，和 Claude Code、Codex 存记忆的方式一样：内容是 bb 的摘要和查看完整记录的命令，项目记忆归到该项目在本机的文件夹（没有文件夹的和 Personal 的对所有项目生效）；bb 改了的记忆更新同一条，bb 删掉的在 magpie 里搁置；整理合并过的记忆保持原样，bb 之后的修改另存为新记忆，被整理或你搁置的记忆一直搁置。运行时 magpie 需要开着。
 
-本地服务只监听 `127.0.0.1`，拒绝 `Host` 不是本机端口的请求，每次 API 调用都要带上页面里的随机令牌，`bb thread open` 只接受形如 `thr_…` 的线程 ID。找不到 `bb` 或命令失败时，页面显示 bb 自己的错误信息和重试按钮。bb 服务器在另一台机器上时，magpie 的环境里的 `bb` 命令行要能连上它。
+本地服务只监听 `127.0.0.1`，拒绝 `Host` 不是本机端口的请求，每次 API 调用都要带上页面里的随机令牌，`bb thread open` 只接受形如 `thr_…` 的线程 ID。找不到 `bb` 或命令失败时，页面显示 bb 自己的错误信息和重试按钮。bb 服务器在另一台机器上时，插件像 bb 自己的线程那样经本机的 bb 主机守护进程连接：从 `~/.bb-machines/<服务器>/host-daemon-port` 读出守护进程的端口，用 `lsof` 找到它所用的 node 和它监听的其他本机端口（其中之一是它加上本机凭据的代理），用守护进程旁边的 bb 逐个试，记住能用的那个，命令失败后重新查找。插件不读凭据。bb 没有公开这些细节，升级后可能失效，那时页面显示 bb 的错误。设置 `bbPath` 则不查找。

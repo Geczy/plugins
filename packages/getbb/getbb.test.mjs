@@ -4,7 +4,7 @@ import { request } from "node:http"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import plugin from "./index.mjs"
-import { BbError, findBb, makeBb, slimThread } from "./lib/bb.mjs"
+import { BbError, daemonClients, findBb, makeBb, slimThread } from "./lib/bb.mjs"
 import { folderOf, foldersHere, importThreads, nativeSessions, providerIdOf, toSession, turnsOf, uuidOf } from "./lib/import.mjs"
 import { importMemories, makeMagpie, projectEnv, toMemory } from "./lib/memory.mjs"
 import { startServer } from "./lib/server.mjs"
@@ -108,6 +108,69 @@ describe("bb", () => {
   test("a missing bb says so", async () => {
     const err = await makeBb({ bbPath: join(dir, "missing") }).snapshot().catch((e) => e)
     expect(err.code).toBe("bb_not_found")
+  })
+
+  test("daemonClients offers the daemon's bb with each other loopback port it listens on", async () => {
+    const home = mkdtempSync(join(tmpdir(), "getbb-daemon-"))
+    const m = join(home, ".bb-machines", "me.getbb.app")
+    const bin = join(m, "npm", "lib", "node_modules", "bb-app", "host-daemon", "dist", "bb")
+    const node = join(home, "node")
+    mkdirSync(join(bin, ".."), { recursive: true })
+    writeFileSync(bin, "")
+    writeFileSync(node, "")
+    writeFileSync(join(m, "host-daemon-port"), "38888\n")
+    // a folder with no daemon, and one whose daemon isn't running
+    mkdirSync(join(home, ".bb-machines", "empty"))
+    mkdirSync(join(home, ".bb-machines", "stopped"))
+    writeFileSync(join(home, ".bb-machines", "stopped", "host-daemon-port"), "40000")
+    const asked = []
+    const sh = async (args) => {
+      asked.push(args.join(" "))
+      if (args.includes("-t")) return args.includes("-iTCP:38888") ? "71150\n" : ""
+      if (args.includes("txt")) return `p71150\nftxt\nn${node}\nftxt\nn/usr/lib/libz.dylib\n`
+      return "p71150\nf20\nn127.0.0.1:55393\nf21\nn*:8080\nf22\nn127.0.0.1:38888\nf23\nn[::1]:55395\n"
+    }
+    expect(await daemonClients(home, sh)).toEqual([
+      { cmd: [node, bin], url: "http://127.0.0.1:55393" },
+      { cmd: [node, bin], url: "http://[::1]:55395" },
+    ])
+    expect(asked).toContain("-nP -a -p 71150 -iTCP -sTCP:LISTEN -Fn")
+    // a program lsof doesn't name: bb runs by its own first line
+    expect((await daemonClients(home, async (args) => (args.includes("txt") ? "" : sh(args))))[0].cmd).toEqual([bin])
+    expect(await daemonClients(join(home, "nowhere"), sh)).toEqual([])
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("outside bb, it runs the daemon's bb through the proxy that answers, and looks again after a failure", async () => {
+    const through = join(dir, "through-proxy")
+    writeFileSync(
+      through,
+      `#!/bin/sh
+[ "$BB_SERVER_URL" = "http://127.0.0.1:2" ] || { echo '{"ok":false,"error":{"code":"http_403","message":"machine not authorized"}}'; exit 1; }
+exec "${fake}" "$@"
+`,
+    )
+    chmodSync(through, 0o755)
+    let looks = 0
+    const viaDaemon = async () => {
+      looks++
+      return [{ cmd: ["/bin/sh", through], url: "http://127.0.0.1:1" }, { cmd: ["/bin/sh", through], url: "http://127.0.0.1:2" }]
+    }
+    const bb = makeBb({ env: { PATH: "" }, viaDaemon })
+    expect((await bb.snapshot()).threads.map((t) => t.id)).toEqual(["thr_1"])
+    expect(looks).toBe(1)
+    expect((await bb.run(["nope"]).catch((e) => e)).code).toBe("not_found")
+    await bb.run(["project", "list"])
+    expect(looks).toBe(2)
+    // in a bb thread or terminal, and with bbPath, bb is run as it is
+    await makeBb({ bbPath: fake, env: { PATH: "" }, viaDaemon }).run(["project", "list"])
+    await makeBb({ env: { PATH: dir, BB_SERVER_URL: "http://x" }, viaDaemon }).run(["project", "list"])
+    expect(looks).toBe(2)
+    // no daemon here: bb from PATH, looked for again next time
+    const none = makeBb({ env: { PATH: dir }, viaDaemon: async () => (looks++, []) })
+    await none.run(["project", "list"])
+    await none.run(["project", "list"])
+    expect(looks).toBe(4)
   })
 
   test("open runs bb thread open only for a thread id", async () => {

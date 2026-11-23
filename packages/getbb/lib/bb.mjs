@@ -2,7 +2,7 @@
 // value on stdout, or {ok: false, error: {code, message}} and a non-zero
 // exit (`bb guide json`), so nothing here scrapes text.
 import { execFile } from "node:child_process"
-import { statSync } from "node:fs"
+import { readdirSync, readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { delimiter, join } from "node:path"
 
@@ -27,6 +27,51 @@ export function findBb(bbPath, env = process.env) {
   return tries.find((p) => p && isFile(p)) || null
 }
 
+const lsof = (args) =>
+  new Promise((resolve) => {
+    const bin = ["/usr/sbin/lsof", "/usr/bin/lsof"].find(isFile)
+    if (!bin) return resolve("")
+    execFile(bin, args, { timeout: 5_000, windowsHide: true }, (_err, stdout) => resolve(String(stdout || "")))
+  })
+
+// Outside bb (magpie opened from the Dock), a bb server on another machine
+// is reached the way bb's own threads reach it: through this computer's bb
+// host daemon, which runs a loopback proxy that adds the computer's
+// credentials, with the bb build beside the daemon (a thread's BB_CLI). bb
+// records neither: each ~/.bb-machines/<server> folder holds only the
+// daemon's own API port, so the proxy is among the other loopback ports
+// that process listens on. That bb starts with `#!/usr/bin/env node`, and
+// the Dock's PATH has no node, so it's run with the node the daemon runs
+// on. These are the candidates, each a command and a server URL still to
+// be tried.
+export async function daemonClients(home = homedir(), sh = lsof) {
+  const found = []
+  const root = join(home, ".bb-machines")
+  let names = []
+  try {
+    names = readdirSync(root)
+  } catch {}
+  for (const name of names) {
+    const dir = join(root, name)
+    const bin = join(dir, "npm", "lib", "node_modules", "bb-app", "host-daemon", "dist", "bb")
+    let port
+    try {
+      port = readFileSync(join(dir, "host-daemon-port"), "utf8").trim()
+    } catch {
+      continue
+    }
+    if (!/^\d+$/.test(port) || !isFile(bin)) continue
+    const pids = (await sh(["-nP", "-t", `-iTCP:${port}`, "-sTCP:LISTEN"])).split("\n").filter((p) => /^\d+$/.test(p))
+    if (!pids.length) continue
+    // the process's own program is the first file lsof lists as its text
+    const node = /^n(\/.+)$/m.exec(await sh(["-nP", "-a", "-p", pids[0], "-d", "txt", "-Fn"]))?.[1]
+    const cmd = node && isFile(node) ? [node, bin] : [bin]
+    const out = await sh(["-nP", "-a", "-p", pids.join(","), "-iTCP", "-sTCP:LISTEN", "-Fn"])
+    for (const [, host, p] of out.matchAll(/^n(127\.0\.0\.1|\[::1\]|localhost):(\d+)$/gm)) if (p !== port) found.push({ cmd, url: `http://${host}:${p}` })
+  }
+  return found
+}
+
 export class BbError extends Error {
   constructor(code, message) {
     super(message)
@@ -34,17 +79,47 @@ export class BbError extends Error {
   }
 }
 
-export function makeBb({ bbPath = "", env = process.env, timeoutMs = 15_000 } = {}) {
-  function run(args) {
+export function makeBb({ bbPath = "", env = process.env, timeoutMs = 15_000, viaDaemon = daemonClients } = {}) {
+  function plain(args) {
     const bin = findBb(bbPath, env)
     if (!bin) {
       const where = bbPath ? `at ${bbPath} (the bbPath option)` : "on PATH, in ~/.local/bin or in BB_CLI"
       return Promise.reject(new BbError("bb_not_found", `bb isn't installed ${where}. Install it from getbb.app, or set bbPath in this plugin's options.`))
     }
+    return exec([bin], args, env)
+  }
+
+  // Outside bb, the daemon's bb and proxy that answered, kept until a
+  // command through them fails (the daemon restarted on another port).
+  let via = null
+  async function find() {
+    for (const c of await viaDaemon()) {
+      const runEnv = { ...env, BB_SERVER_URL: c.url }
+      if (await exec(c.cmd, ["project", "list", "--include-personal"], runEnv).then(() => true, () => false)) return { cmd: c.cmd, env: runEnv }
+    }
+    return null
+  }
+
+  async function run(args) {
+    if (bbPath || env.BB_SERVER_URL) return plain(args)
+    via ??= find()
+    const v = await via
+    if (!v) {
+      via = null
+      return plain(args)
+    }
+    return exec(v.cmd, args, v.env).catch((e) => {
+      via = null
+      throw e
+    })
+  }
+
+  // cmd: bb, or the program that runs it and bb
+  function exec([bin, ...pre], args, env) {
     return new Promise((resolve, reject) => {
       execFile(
         bin,
-        [...args, "--json"],
+        [...pre, ...args, "--json"],
         { env, timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, windowsHide: true, shell: win && /\.cmd$/i.test(bin) },
         (err, stdout, stderr) => {
           let out
