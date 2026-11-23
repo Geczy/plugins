@@ -3,11 +3,13 @@
 // any ~/.claude* folder that has a projects/ folder (appdir.ClaudeHomesIn);
 // Claude Code itself reads only ~/.claude, so its /resume never sees these.
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, join, sep } from "node:path"
 
 const PAGE = 1000
+// Raised when what a file holds changes, so every thread is written again once.
+const FORMAT = 3
 
 // A stable UUID (v5-shaped) from a string, so a re-import rewrites the same file.
 export function uuidOf(s) {
@@ -15,15 +17,25 @@ export function uuidOf(s) {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`
 }
 
+// bb marks some turns as the user's although a program wrote them: a plugin's
+// prompt (the advisor's review brief, an automation's prompt) names the plugin
+// in originPluginId, an automation's prompt starts "[bb automation due:" even
+// where it doesn't (into a thread it re-prompts, or from an older bb), and a
+// child thread opens with its parent agent's prompt. A provider plugin's turn
+// is the user's answer to the agent's question.
+const byProgram = (d, text, thread) =>
+  (d.originPluginId && !d.originPluginId.startsWith("provider-")) || text.startsWith("[bb automation due:") || (thread.parentThreadId && d.source === "spawn")
+
 // What Memory reads: what the user typed and what the agent answered.
-// Tool calls, diffs and messages from other threads are left out.
-export function turnsOf(events) {
+// Tool calls, diffs, messages from other threads and prompts programs wrote
+// are left out, so Memory never takes them for the user's own words.
+export function turnsOf(events, thread = {}) {
   const turns = []
   for (const e of events) {
     const d = e.data || {}
     if (e.type === "client/turn/requested" && d.initiator === "user") {
       const text = (d.input || []).filter((i) => i.type === "text").map((i) => i.text).join("\n\n").trim()
-      if (text) turns.push({ role: "user", text, at: e.createdAt, key: e.id })
+      if (text && !byProgram(d, text, thread)) turns.push({ role: "user", text, at: e.createdAt, key: e.id })
     } else if (e.type === "item/completed" && d.item?.type === "agentMessage" && d.item.text?.trim()) {
       turns.push({ role: "assistant", text: d.item.text.trim(), at: e.createdAt, key: e.id })
     }
@@ -39,7 +51,7 @@ export function providerIdOf(events) {
 // The session file for a thread: its folder under projects/, its name and
 // its lines. null when the thread has nothing anyone wrote.
 export function toSession(thread, events) {
-  const turns = turnsOf(events)
+  const turns = turnsOf(events, thread)
   if (!turns.length) return null
   const sessionId = uuidOf(thread.id)
   const cwd = thread.environmentPath || "/"
@@ -104,9 +116,12 @@ function writeAtomic(path, text) {
 
 // Brings out/projects up to date with bb: every thread, archived and hidden
 // ones too. A thread is fetched again only when bb says it changed or its
-// file is gone. out/bb-import.json remembers what each thread became.
+// file is gone. out/bb-import.json remembers what each thread became. A file
+// this wrote earlier goes when its thread now has a native session, nothing
+// left to keep, or another folder.
 export async function importThreads({ bb, out = join(homedir(), ".claude-bb"), native = nativeSessions(), workers = 4 }) {
   const stateFile = join(out, "bb-import.json")
+  const ours = join(out, "projects") + sep
   let state = {}
   try {
     state = JSON.parse(readFileSync(stateFile, "utf8"))
@@ -114,7 +129,7 @@ export async function importThreads({ bb, out = join(homedir(), ".claude-bb"), n
   const threads = await bb.run(["thread", "list", "--include-archived", "--include-hidden"])
   const due = threads.filter((t) => {
     const was = state[t.id]
-    return !was || was.updatedAt !== t.updatedAt || (was.path && !existsSync(was.path))
+    return !was || was.format !== FORMAT || was.updatedAt !== t.updatedAt || (was.path && !existsSync(was.path))
   })
   const counts = { threads: threads.length, written: 0, native: 0, empty: 0, failed: [] }
   const queue = [...due]
@@ -126,8 +141,10 @@ export async function importThreads({ bb, out = join(homedir(), ".claude-bb"), n
         const s = own ? null : toSession(t, events)
         const path = own || (s && join(out, "projects", s.dir, s.name))
         if (s) writeAtomic(path, s.text)
+        const was = state[t.id]?.path
+        if (was && was !== path && was.startsWith(ours)) rmSync(was, { force: true })
         counts[own ? "native" : s ? "written" : "empty"]++
-        state[t.id] = { updatedAt: t.updatedAt, path: path || null }
+        state[t.id] = { format: FORMAT, updatedAt: t.updatedAt, path: path || null }
       } catch (e) {
         counts.failed.push(`${t.id}: ${e.message}`)
       }

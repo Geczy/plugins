@@ -51,7 +51,8 @@ node packages/getbb/import.mjs            # or: node import.mjs <folder> to writ
 ```
 
 - Each file keeps what you typed and what the agent answered, which is all Memory reads, under the thread's title and folder. Tool calls, diffs and images stay in bb.
-- A thread that ran on this computer and still has its Claude Code or Codex session here is left to that session, so it isn't listed twice.
+- bb files some prompts under you that a program wrote: a plugin's (the advisor's review brief, an automation's prompt) and the one a parent thread's agent opens a child thread with. These are left out, so Memory doesn't learn them as your rules. Your answers to an agent's questions stay.
+- A thread that ran on this computer and still has its Claude Code or Codex session here is left to that session, so it isn't listed twice. magpie reads that session as the agent wrote it, plugin prompts included.
 - A second run fetches only the threads bb says changed, and prints nothing when none did. `~/.claude-bb/bb-import.json` remembers what each thread became.
 - Codex, Kimi and Muse threads are written as Claude Code sessions too, so magpie lists them under Claude Code.
 
@@ -78,6 +79,6 @@ bun scripts/check.mjs getbb
 
 选项：`port`（默认 3498）是页面本地服务的端口；`bbPath` 是 `bb` 的完整路径，留空时依次查找 `$BB_CLI`、`PATH`、`~/.local/bin`、`/opt/homebrew/bin` 和 `/usr/local/bin`。
 
-`node import.mjs` 把所有 bb 线程（包括已归档和隐藏的）写成 Claude Code 会话，放在 `~/.claude-bb/projects`，magpie 的会话页、`magpie sessions search` 和记忆的「从对话中学习」都能读到；需先运行 `magpie sessions read on claude`。只保留你写的和智能体回答的文字；本机已有 Claude Code 或 Codex 会话的线程不重复写入；再次运行只取有变化的线程。
+`node import.mjs` 把所有 bb 线程（包括已归档和隐藏的）写成 Claude Code 会话，放在 `~/.claude-bb/projects`，magpie 的会话页、`magpie sessions search` 和记忆的「从对话中学习」都能读到；需先运行 `magpie sessions read on claude`。只保留你写的和智能体回答的文字，插件或父线程智能体写的提示不算作你的话；本机已有 Claude Code 或 Codex 会话的线程不重复写入；再次运行只取有变化的线程。
 
 本地服务只监听 `127.0.0.1`，拒绝 `Host` 不是本机端口的请求，每次 API 调用都要带上页面里的随机令牌，`bb thread open` 只接受形如 `thr_…` 的线程 ID。找不到 `bb` 或命令失败时，页面显示 bb 自己的错误信息和重试按钮。bb 服务器在另一台机器上时，magpie 的环境里的 `bb` 命令行要能连上它。

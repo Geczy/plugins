@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { request } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -221,6 +221,21 @@ describe("import", () => {
     expect(providerIdOf([])).toBeNull()
   })
 
+  test("leaves out prompts a plugin or a parent agent wrote, keeps the user's answers", () => {
+    const turn = (seq, text, extra) => ev(seq, "client/turn/requested", { initiator: "user", input: [{ type: "text", text }], ...extra })
+    const events = [
+      turn(1, "You are the independent advisor", { source: "spawn", originPluginId: "advisor" }),
+      turn(2, "[bb automation due:auto_x] You are Knight", { source: "spawn", originPluginId: "automations" }),
+      turn(3, "> Image mockup or code?\n\nBuild directly in code", { source: "tell", originPluginId: "provider-codex" }),
+      turn(4, "Verify the UI", { source: "spawn" }),
+      turn(5, "deploy and migrate", { source: "tell" }),
+      turn(6, "[bb automation due:auto_y]\n\nMonitor the archive", { source: "tell" }),
+    ]
+    const users = (thread) => turnsOf(events, thread).map((t) => t.text)
+    expect(users({})).toEqual(["> Image mockup or code?\n\nBuild directly in code", "Verify the UI", "deploy and migrate"])
+    expect(users({ parentThreadId: "thr_parent" })).toEqual(["> Image mockup or code?\n\nBuild directly in code", "deploy and migrate"])
+  })
+
   test("a thread becomes a Claude Code session, the same file each time", () => {
     const s = toSession(thr, [said(1, "hi"), answered(2, "hello")])
     expect(s.dir).toBe("-home-opc-app")
@@ -290,6 +305,29 @@ describe("import", () => {
     threads[3] = { ...threads[3], updatedAt: 2 }
     rmSync(ownFile)
     expect(await importThreads({ bb, out, native: new Map() })).toMatchObject({ written: 3, native: 0 })
+    rmSync(out, { recursive: true, force: true })
+  })
+
+  test("rewrites an earlier version's files once, and removes one a native session replaced", async () => {
+    const out = mkdtempSync(join(tmpdir(), "getbb-out-"))
+    const file = join(out, "projects", "-home-opc-app", `${uuidOf("thr_imp1")}.jsonl`)
+    mkdirSync(join(out, "projects", "-home-opc-app"), { recursive: true })
+    writeFileSync(file, "old\n")
+    writeFileSync(join(out, "bb-import.json"), JSON.stringify({ thr_imp1: { updatedAt: 1, path: file } }))
+    const threads = [thr]
+    let events = [said(1, "hi"), answered(2, "hello")]
+    const bb = { run: async (args) => (args[1] === "list" ? threads : events) }
+    expect(await importThreads({ bb, out, native: new Map() })).toMatchObject({ written: 1 })
+    expect(readFileSync(file, "utf8")).toContain('"hello"')
+    expect(await importThreads({ bb, out, native: new Map() })).toMatchObject({ written: 0 })
+
+    const ownFile = join(out, "native-1.jsonl")
+    writeFileSync(ownFile, "")
+    events = [ev(0, "thread/identity", { providerThreadId: "native-1" }), ...events]
+    threads[0] = { ...thr, updatedAt: 2 }
+    expect(await importThreads({ bb, out, native: new Map([["native-1", ownFile]]) })).toMatchObject({ native: 1 })
+    expect(existsSync(file)).toBe(false)
+    expect(existsSync(ownFile)).toBe(true)
     rmSync(out, { recursive: true, force: true })
   })
 
