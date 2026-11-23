@@ -50,20 +50,20 @@ It never reads the credentials: the daemon adds them. bb documents none of this,
 
 ## Your bb threads in magpie's Sessions and Memory
 
-magpie's Sessions page, `magpie sessions search` and Memory's **Learn from conversations** read the sessions agents keep on this computer. A bb thread that ran on another machine isn't one of them. `import.mjs` writes every bb thread (archived and hidden ones too) as a Claude Code session in `~/.claude-bb/projects`, a folder magpie reads and Claude Code's own `/resume` doesn't:
+magpie's Sessions page, Usage, `magpie sessions search` and Memory's **Learn from conversations** read the sessions agents keep on this computer. A bb thread that ran on another machine isn't one of them. `import.mjs` brings every bb thread (archived and hidden ones too) to this computer, into folders magpie reads and Claude Code's `/resume` and Codex's own history don't:
 
 ```sh
-node packages/getbb/import.mjs            # or: node import.mjs <folder> to write somewhere else
+node packages/getbb/import.mjs            # or: node import.mjs <folder> to write into <folder>/projects and <folder>/codex
 ```
 
-- Each file keeps what you typed and what the agent answered, which is all Memory reads, under the thread's title. Tool calls, diffs and images stay in bb.
+- A thread that ran on another machine gets its agent's own session file from there, read with `bb file list` and `bb file read --host`: a Claude Code session, with its subagents' files, into `~/.claude-bb/projects`, and a Codex rollout into `~/.codex-bb/sessions`. magpie reads it like a session from this computer, with its models, token counts and cost, and with plugin prompts and tool output as the agent wrote them. The one change is the folder it names, which becomes the thread's folder on this computer (see below). Each file is checked against the SHA-256 bb sends with it, and one that arrives changed is reported and tried again on the next run.
+- Every other thread is written as a Claude Code session in `~/.claude-bb/projects`: what you typed and what the agent answered, under the thread's title, each answer naming the model bb ran its turn with. Tool calls, diffs and images stay in bb, and magpie shows its cost as $0, since bb keeps no token counts per turn. This is what becomes of a session file over the 25 MB `bb file read` sends, a compressed Codex rollout (`.jsonl.zst`), a Kimi or Muse thread and a thread from a machine bb has removed. A thread from a machine that's offline becomes one for now, and the next run tries its own file again.
 - A thread is filed under its project's folder on this computer, so Memory learns it for that project: the folder it ran in when that is one of the project's folders here, else the project's folder here. Personal threads, and threads of a project with no folder here, are filed under your home folder. When a project gets a folder here later, its threads move there on the next run.
-- bb files some prompts under you that a program wrote: a plugin's (the advisor's review brief, an automation's prompt) and the one a parent thread's agent opens a child thread with. These are left out, so Memory doesn't learn them as your rules. Your answers to an agent's questions stay.
-- A thread that ran on this computer and still has its Claude Code or Codex session here is left to that session, so it isn't listed twice. magpie reads that session as the agent wrote it, plugin prompts included.
-- A second run fetches only the threads bb says changed, and prints nothing when none did. `~/.claude-bb/bb-import.json` remembers what each thread became.
-- Codex, Kimi and Muse threads are written as Claude Code sessions too, so magpie lists them under Claude Code.
+- bb files some prompts under you that a program wrote: a plugin's (the advisor's review brief, an automation's prompt) and the one a parent thread's agent opens a child thread with. A session written from a thread leaves these out, so Memory doesn't learn them as your rules, and keeps your answers to an agent's questions. A session file copied from the thread's machine has them, as one from this computer does.
+- A thread that ran on this computer and still has its Claude Code or Codex session here is left to that session, so it isn't listed twice.
+- A second run fetches only the threads bb says changed and those whose machine was offline, and prints nothing when none did. `~/.claude-bb/bb-import.json` remembers what each thread became.
 
-magpie reads them once Claude Code's sessions are allowed: `magpie sessions read on claude`.
+magpie reads them once Claude Code's and Codex's sessions are allowed: `magpie sessions read on claude` and `magpie sessions read on codex`.
 
 ### bb's memories in magpie's Memory
 
@@ -98,6 +98,6 @@ bun scripts/check.mjs getbb
 
 选项：`port`（默认 3498）是页面本地服务的端口；`bbPath` 是 `bb` 的完整路径，留空时先找本机的 bb 主机守护进程（见下），再依次查找 `$BB_CLI`、`PATH`、`~/.local/bin`、`/opt/homebrew/bin` 和 `/usr/local/bin`。
 
-`node import.mjs` 把所有 bb 线程（包括已归档和隐藏的）写成 Claude Code 会话，放在 `~/.claude-bb/projects` 下该线程所属项目在本机的文件夹里（Personal 的线程和本机没有文件夹的项目的线程放在主文件夹下），magpie 的会话页、`magpie sessions search` 和记忆的「从对话中学习」都能读到；需先运行 `magpie sessions read on claude`。只保留你写的和智能体回答的文字，插件或父线程智能体写的提示不算作你的话；本机已有 Claude Code 或 Codex 会话的线程不重复写入；再次运行只取有变化的线程。之后它用 `magpie tool memory_save` 把每条 bb 记忆（`bb memory`）存进 magpie 的记忆，和 Claude Code、Codex 存记忆的方式一样：内容是 bb 的摘要和查看完整记录的命令，项目记忆归到该项目在本机的文件夹（没有文件夹的和 Personal 的对所有项目生效）；bb 改了的记忆更新同一条，bb 删掉的在 magpie 里搁置；整理合并过的记忆保持原样，bb 之后的修改另存为新记忆，被整理或你搁置的记忆一直搁置。运行时 magpie 需要开着。
+`node import.mjs` 把所有 bb 线程（包括已归档和隐藏的）放到本机 magpie 能读到的地方，magpie 的会话页、用量、`magpie sessions search` 和记忆的「从对话中学习」都能读到；需先运行 `magpie sessions read on claude` 和 `magpie sessions read on codex`。在其他机器上运行的线程，若 bb 能读到那台机器上智能体自己的会话文件（`bb file read --host`，按 bb 给的 SHA-256 校验），就原样复制过来：Claude Code 的（连同子代理的文件）放进 `~/.claude-bb/projects`，Codex 的放进 `~/.codex-bb/sessions`，magpie 能看到其中的模型、token 数和费用，只把其中的文件夹改成本机的。其余线程写成 Claude Code 会话，放在 `~/.claude-bb/projects`：只保留你写的和智能体回答的文字，每条回答注明 bb 运行该轮所用的模型，插件或父线程智能体写的提示不算作你的话；bb 不记每轮的 token 数，所以费用显示为 0。超过 25 MB（`bb file read` 的上限）的会话文件、压缩的 Codex 记录（`.jsonl.zst`）、Kimi 和 Muse 线程、已移除机器上的线程都这样写；离线机器上的线程先这样写，下次运行再试。会话放在该线程所属项目在本机的文件夹下（Personal 的线程和本机没有文件夹的项目的线程放在主文件夹下）；本机已有 Claude Code 或 Codex 会话的线程不重复写入；再次运行只取有变化的线程和上次离线的机器上的线程。之后它用 `magpie tool memory_save` 把每条 bb 记忆（`bb memory`）存进 magpie 的记忆，和 Claude Code、Codex 存记忆的方式一样：内容是 bb 的摘要和查看完整记录的命令，项目记忆归到该项目在本机的文件夹（没有文件夹的和 Personal 的对所有项目生效）；bb 改了的记忆更新同一条，bb 删掉的在 magpie 里搁置；整理合并过的记忆保持原样，bb 之后的修改另存为新记忆，被整理或你搁置的记忆一直搁置。运行时 magpie 需要开着。
 
 本地服务只监听 `127.0.0.1`，拒绝 `Host` 不是本机端口的请求，每次 API 调用都要带上页面里的随机令牌，`bb thread open` 只接受形如 `thr_…` 的线程 ID。找不到 `bb` 或命令失败时，页面显示 bb 自己的错误信息和重试按钮。bb 服务器在另一台机器上时，插件像 bb 自己的线程那样经本机的 bb 主机守护进程连接：从 `~/.bb-machines/<服务器>/host-daemon-port` 读出守护进程的端口，用 `lsof` 找到它所用的 node 和它监听的其他本机端口（其中之一是它加上本机凭据的代理），用守护进程旁边的 bb 逐个试，记住能用的那个，命令失败后重新查找。插件不读凭据。bb 没有公开这些细节，升级后可能失效，那时页面显示 bb 的错误。设置 `bbPath` 则不查找。

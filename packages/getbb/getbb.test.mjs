@@ -1,11 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { request } from "node:http"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import plugin from "./index.mjs"
 import { BbError, daemonClients, findBb, makeBb, slimThread } from "./lib/bb.mjs"
-import { folderOf, foldersHere, importThreads, nativeSessions, providerIdOf, toSession, turnsOf, uuidOf } from "./lib/import.mjs"
+import { folderOf, foldersHere, homeOf, hostsHere, importThreads, nativeSessions, providerIdOf, refiled, toSession, turnsOf, uuidOf } from "./lib/import.mjs"
 import { importMemories, makeMagpie, projectEnv, toMemory } from "./lib/memory.mjs"
 import { startServer } from "./lib/server.mjs"
 
@@ -314,6 +315,166 @@ describe("import", () => {
     expect(toSession(thr, [ev(1, "thread/identity", {})])).toBeNull()
   })
 
+  test("each reply names the model bb ran its turn with", () => {
+    const asked = (seq, model, initiator = "user") => ev(seq, "client/turn/requested", { initiator, input: [{ type: "text", text: `q${seq}` }], execution: { model } })
+    const events = [answered(1, "before any"), asked(2, "claude-opus-5-5"), answered(3, "a"), asked(4, "gpt-6.1-sol", "agent"), answered(5, "b")]
+    expect(turnsOf(events).map((t) => [t.text, t.model])).toEqual([["before any", undefined], ["q2", undefined], ["a", "claude-opus-5-5"], ["b", "gpt-6.1-sol"]])
+    const models = toSession(thr, events).text.trim().split("\n").map((l) => JSON.parse(l)).filter((l) => l.type === "assistant").map((l) => l.message.model)
+    expect(models).toEqual(["bb-import", "claude-opus-5-5", "gpt-6.1-sol"])
+  })
+
+  test("the home folder on a machine, from a folder a thread ran in there", () => {
+    expect(homeOf("/home/opc/.bb-machines/s/plugins/environment-personal-workspace/host-data/workspaces/thr_1")).toBe("/home/opc")
+    expect(homeOf("/home/ubuntu/projects/app")).toBe("/home/ubuntu")
+    expect(homeOf("/Users/me")).toBe("/Users/me")
+    expect(homeOf("/root/app")).toBe("/root")
+    expect(homeOf("/srv/app")).toBeNull()
+    expect(homeOf(null)).toBeNull()
+  })
+
+  test("a session from another machine names this computer's folder, the rest as the agent wrote it", () => {
+    const claude = ['{"type":"user","cwd":"/home/opc/app","message":{"role":"user","content":"hi"}}', '{"type":"summary","summary":"x"}', "not json", ""].join("\n")
+    expect(refiled(claude, "/Users/me/app")).toBe(['{"type":"user","cwd":"/Users/me/app","message":{"role":"user","content":"hi"}}', '{"type":"summary","summary":"x"}', "not json", ""].join("\n"))
+    const codex = ['{"type":"session_meta","payload":{"id":"x","cwd":"/home/opc/app"}}', '{"type":"turn_context","payload":{"cwd":"/home/opc/app","model":"gpt-6.1-sol"}}', '{"type":"response_item","payload":{"cwd":"/home/opc/app"}}'].join("\n")
+    expect(refiled(codex, "/Users/me")).toBe(['{"type":"session_meta","payload":{"id":"x","cwd":"/Users/me"}}', '{"type":"turn_context","payload":{"cwd":"/Users/me","model":"gpt-6.1-sol"}}', '{"type":"response_item","payload":{"cwd":"/home/opc/app"}}'].join("\n"))
+  })
+
+  test("copies a thread's own session from the machine it ran on; a copy of the thread where it can't", async () => {
+    const out = mkdtempSync(join(tmpdir(), "getbb-out-"))
+    const codexOut = mkdtempSync(join(tmpdir(), "getbb-codex-"))
+    const mine = (p) => p.startsWith("/Users/me/")
+    const web = { id: "p_web", sources: [{ type: "local_path", path: "/Users/me/web", isDefault: true }] }
+    const far = { projectId: "p_web", updatedAt: 1, environmentHostId: "host_far" }
+    const CX = "01a1aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee"
+    const threads = [
+      { ...far, id: "thr_cc", title: "cc", environmentPath: "/home/opc/web" },
+      { ...far, id: "thr_cx", title: "cx", environmentPath: null },
+      { ...far, id: "thr_zst", title: "zst" },
+      { ...far, id: "thr_off", title: "off", environmentHostId: "host_off", environmentPath: "/home/pi/.bb-machines/s/x/thr_off" },
+      { ...far, id: "thr_gone", title: "gone", environmentHostId: "host_gone", environmentPath: "/home/old/web" },
+      { ...far, id: "thr_mac", title: "mac", environmentHostId: "host_mac", environmentPath: "/Users/me/web" },
+    ]
+    const sessionOf = { thr_cc: "c-1", thr_cx: CX, thr_zst: "01a1ffff-bbbb-7ccc-8ddd-eeeeeeeeeeee", thr_off: "c-off", thr_gone: "c-gone", thr_mac: "c-mac" }
+    const asked = (seq) => ev(seq, "client/turn/requested", { initiator: "user", input: [{ type: "text", text: "hi" }], execution: { model: "claude-opus-5-5" } })
+    let offline = true
+    const remote = {
+      "/home/opc/.claude/projects/-home-opc-web/c-1.jsonl": '{"type":"user","cwd":"/home/opc/web","sessionId":"c-1"}\n{"type":"assistant","cwd":"/home/opc/web","message":{"model":"claude-opus-5-5","usage":{"input_tokens":3,"output_tokens":5}}}\n',
+      "/home/opc/.claude/projects/-home-opc-web/c-1/subagents/agent-a1.jsonl": '{"type":"assistant","cwd":"/home/opc/web","isSidechain":true}\n',
+      [`/home/opc/.codex/archived_sessions/rollout-2026-11-20T10-00-00-${CX}.jsonl`]: '{"type":"session_meta","payload":{"id":"x","cwd":"/home/opc/web"}}\n{"type":"event_msg","payload":{"type":"token_count"}}\n',
+      "/home/pi/.claude/projects/-home-pi/c-off.jsonl": '{"type":"user","cwd":"/home/pi"}\n',
+    }
+    const listings = {
+      "host_far /home/opc/.claude/projects": ["-home-opc-web/c-1.jsonl", "-home-opc-web/c-1/subagents/agent-a1.jsonl", "-home-opc-web/c-1/subagents/agent-a1.meta.json", "-home-opc/memory/MEMORY.md"],
+      "host_far /home/opc/.codex/sessions": ["2026/11/19/rollout-2026-11-19T09-00-00-01a1ffff-bbbb-7ccc-8ddd-eeeeeeeeeeee.jsonl.zst"],
+      "host_far /home/opc/.codex/archived_sessions": [`rollout-2026-11-20T10-00-00-${CX}.jsonl`],
+      "host_off /home/pi/.claude/projects": ["-home-pi/c-off.jsonl"],
+    }
+    const calls = []
+    const sha = (s) => createHash("sha256").update(s).digest("hex")
+    const bb = {
+      run: async (args) => {
+        calls.push(args.join(" "))
+        const [what, verb] = args
+        if (what === "project") return [web]
+        if (what === "thread" && verb === "list") return threads
+        if (what === "thread") return [ev(1, "thread/identity", { providerThreadId: sessionOf[args[2]] }), asked(2), answered(3, "hello")]
+        if (what === "machine") return [{ id: "host_far", status: "connected" }, { id: "host_off", status: offline ? "disconnected" : "connected" }, { id: "host_mac", status: "connected" }]
+        const host = args[args.indexOf("--host") + 1]
+        const path = args[args.indexOf("--host") + 2]
+        if (verb === "list") return { files: (listings[`${host} ${path}`] || []).map((p) => ({ path: p, name: p.split("/").pop() })), truncated: false }
+        if (verb === "read") return { path, content: remote[path], contentEncoding: "utf8", sha256: sha(remote[path]) }
+        throw new Error(`unexpected ${args.join(" ")}`)
+      },
+    }
+    const run = () => importThreads({ bb, out, codexOut, here: mine, home: "/Users/me", native: new Map(), hereHosts: new Set(["host_mac"]) })
+    expect(await run()).toEqual({ threads: 6, written: 4, copied: 2, native: 0, empty: 0, failed: [] })
+    // Claude Code's, under the project's folder here, its subagents beside it
+    const dir = join(out, "projects", "-Users-me-web")
+    expect(readFileSync(join(dir, "c-1.jsonl"), "utf8")).toBe('{"type":"user","cwd":"/Users/me/web","sessionId":"c-1"}\n{"type":"assistant","cwd":"/Users/me/web","message":{"model":"claude-opus-5-5","usage":{"input_tokens":3,"output_tokens":5}}}\n')
+    expect(readFileSync(join(dir, "c-1", "subagents", "agent-a1.jsonl"), "utf8")).toBe('{"type":"assistant","cwd":"/Users/me/web","isSidechain":true}\n')
+    expect(existsSync(join(dir, `${uuidOf("thr_cc")}.jsonl`))).toBe(false)
+    // Codex's, in a Codex home of its own, by the day it started
+    expect(readFileSync(join(codexOut, "sessions", "2026", "11", "20", `rollout-2026-11-20T10-00-00-${CX}.jsonl`), "utf8")).toBe('{"type":"session_meta","payload":{"id":"x","cwd":"/Users/me/web"}}\n{"type":"event_msg","payload":{"type":"token_count"}}\n')
+    // a compressed rollout, a machine that's off or gone, and this computer: a copy of the thread
+    for (const t of ["thr_zst", "thr_off", "thr_gone", "thr_mac"]) expect(readFileSync(join(dir, `${uuidOf(t)}.jsonl`), "utf8")).toContain('"model":"claude-opus-5-5"')
+    expect(calls.filter((c) => c.startsWith("file list"))).toEqual(["file list --host host_far /home/opc/.claude/projects --limit 10000", "file list --host host_far /home/opc/.codex/sessions --limit 10000", "file list --host host_far /home/opc/.codex/archived_sessions --limit 10000"])
+
+    // next time only the thread on the machine that was off is fetched again,
+    // and once it's on, its own session replaces the copy
+    calls.length = 0
+    expect(await run()).toMatchObject({ written: 1, copied: 0 })
+    expect(calls.filter((c) => c.startsWith("thread messages")).map((c) => c.split(" ")[2])).toEqual(["thr_off"])
+    offline = false
+    expect(await run()).toMatchObject({ written: 0, copied: 1 })
+    expect(readFileSync(join(dir, "c-off.jsonl"), "utf8")).toBe('{"type":"user","cwd":"/Users/me/web"}\n')
+    expect(existsSync(join(dir, `${uuidOf("thr_off")}.jsonl`))).toBe(false)
+    calls.length = 0
+    expect(await run()).toMatchObject({ written: 0, copied: 0 })
+    expect(calls).toEqual(["thread list --include-archived --include-hidden", "project list --include-personal"])
+
+    // a file that arrives changed is reported and tried again
+    remote["/home/opc/.claude/projects/-home-opc-web/c-1.jsonl"] += "\n"
+    threads[0] = { ...threads[0], updatedAt: 2 }
+    const sent = bb.run
+    bb.run = async (args) => (args[1] === "read" ? { ...(await sent(args)), sha256: "0" } : sent(args))
+    expect((await run()).failed).toEqual(["thr_cc: /home/opc/.claude/projects/-home-opc-web/c-1.jsonl on host_far didn't arrive whole"])
+    rmSync(out, { recursive: true, force: true })
+    rmSync(codexOut, { recursive: true, force: true })
+  })
+
+  test("a machine whose files can't be listed is reported once, and its threads are tried again", async () => {
+    const out = mkdtempSync(join(tmpdir(), "getbb-out-"))
+    const threads = ["thr_a", "thr_b"].map((id) => ({ ...thr, id, environmentHostId: "host_bad" }))
+    let broken = true
+    const bb = {
+      run: async (args) => {
+        if (args[0] === "project") return [app]
+        if (args[0] === "thread") return args[1] === "list" ? threads : [ev(1, "thread/identity", { providerThreadId: `c-${args[2]}` }), said(2, "hi")]
+        if (args[0] === "machine") return [{ id: "host_bad", status: "connected" }]
+        if (broken) throw new BbError("host_unavailable", "host_bad isn't connected")
+        return { files: [], truncated: false }
+      },
+    }
+    const run = () => importThreads({ bb, out, codexOut: join(out, "codex"), here, native: new Map(), hereHosts: new Set() })
+    expect(await run()).toMatchObject({ written: 2, copied: 0, failed: ["host_bad: host_bad isn't connected"] })
+    broken = false
+    expect(await run()).toMatchObject({ written: 2, failed: [] })
+    expect(await run()).toMatchObject({ written: 0, failed: [] })
+    rmSync(out, { recursive: true, force: true })
+  })
+
+  test("a session file too big for bb to send becomes a copy of the thread", async () => {
+    const out = mkdtempSync(join(tmpdir(), "getbb-out-"))
+    const calls = []
+    const bb = {
+      run: async (args) => {
+        calls.push(args.slice(0, 2).join(" "))
+        if (args[0] === "project") return [app]
+        if (args[0] === "thread") return args[1] === "list" ? [{ ...thr, environmentHostId: "host_far" }] : [ev(1, "thread/identity", { providerThreadId: "c-big" }), said(2, "hi")]
+        if (args[0] === "machine") return [{ id: "host_far", status: "connected" }]
+        if (args[1] === "list") return { files: args[4].endsWith("projects") ? [{ path: "-home-opc-app/c-big.jsonl" }] : [], truncated: false }
+        throw new BbError("file_too_large", "HTTP 413: File size 65548697 bytes exceeds the 25 MB limit")
+      },
+    }
+    const run = () => importThreads({ bb, out, codexOut: join(out, "codex"), here, native: new Map(), hereHosts: new Set() })
+    expect(await run()).toMatchObject({ written: 1, copied: 0, failed: [] })
+    expect(existsSync(join(out, "projects", "-home-opc-app", `${uuidOf("thr_imp1")}.jsonl`))).toBe(true)
+    calls.length = 0
+    expect(await run()).toMatchObject({ written: 0, failed: [] })
+    expect(calls).toEqual(["thread list", "project list"])
+    rmSync(out, { recursive: true, force: true })
+  })
+
+  test("this computer's machine ids are in each bb server's folder", () => {
+    const home = mkdtempSync(join(tmpdir(), "getbb-home-"))
+    mkdirSync(join(home, ".bb-machines", "a.getbb.app"), { recursive: true })
+    mkdirSync(join(home, ".bb-machines", "b.getbb.app"), { recursive: true })
+    writeFileSync(join(home, ".bb-machines", "a.getbb.app", "host-id"), "host_a\n")
+    const ids = hostsHere(home)
+    rmSync(home, { recursive: true, force: true })
+    expect([...ids]).toEqual(["host_a"])
+  })
+
   test("a thread is filed under its project's folder on this computer, else the home folder", () => {
     const web = { id: "p_web", sources: [{ type: "local_path", path: "/srv/web", isDefault: true }, { type: "local_path", path: "/Users/me/web", isDefault: false }] }
     const mine = (p) => p.startsWith("/Users/me/")
@@ -405,14 +566,14 @@ describe("import", () => {
     writeFileSync(ownFile, "")
     const native = new Map([["native-1", ownFile]])
     const first = await importThreads({ bb, out, here, native })
-    expect(first).toEqual({ threads: 4, written: 2, native: 1, empty: 1, failed: [] })
+    expect(first).toEqual({ threads: 4, written: 2, copied: 0, native: 1, empty: 1, failed: [] })
     expect(calls[0]).toBe("thread list --include-archived --include-hidden")
     expect(calls.filter((c) => c.startsWith("thread messages thr_long"))).toEqual(["thread messages thr_long --limit 1000 --after-seq 0", "thread messages thr_long --limit 1000 --after-seq 1000"])
     const long = readFileSync(join(out, "projects", "-home-opc-app", `${uuidOf("thr_long")}.jsonl`), "utf8")
     expect(long).toContain('"last"')
 
     calls.length = 0
-    expect(await importThreads({ bb, out, here, native })).toEqual({ threads: 4, written: 0, native: 0, empty: 0, failed: [] })
+    expect(await importThreads({ bb, out, here, native })).toEqual({ threads: 4, written: 0, copied: 0, native: 0, empty: 0, failed: [] })
     expect(calls).toEqual(["thread list --include-archived --include-hidden", "project list --include-personal"])
 
     // a deleted file and a changed thread are fetched again; so is a thread
